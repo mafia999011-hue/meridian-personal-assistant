@@ -45,8 +45,8 @@ async function api(url, options = {}) {
   if (!response.ok) throw Error(data.error || `Request failed (${response.status}).`);
   return data;
 }
-async function streamChat(payload, signal, onToken) {
-  const response = await fetch('/api/chat', {
+async function streamChat(payload, signal, onToken, endpoint = '/api/chat', onProgress = () => {}) {
+  const response = await fetch(endpoint, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(payload), signal
   });
@@ -63,6 +63,7 @@ async function streamChat(payload, signal, onToken) {
     if (!line.startsWith('data:')) return;
     let event; try { event = JSON.parse(line.slice(5).trim()); } catch { return; }
     if (event.error) throw Error(event.error);
+    if (typeof event.progress === 'string') onProgress(event.progress);
     if (typeof event.token === 'string') onToken(event.token);
     if (event.done) result = event.result;
   };
@@ -127,19 +128,20 @@ async function ask(text) {
   let liveAnswer = null;
   try {
     const payload = isResearch ? { question: prompt } : { message: prompt, history, mode };
-    let data;
-    if (isResearch) data = await api('/api/research', { method: 'POST', body: JSON.stringify(payload), signal: controller.signal });
-    else {
-      liveAnswer = bubble('assistant', '');
-      data = await streamChat(payload, controller.signal, token => {
-        if (id !== requestSeq || !liveAnswer) return;
-        liveAnswer.answerText.data += token; convo.scrollTop = convo.scrollHeight;
-      });
-    }
+    liveAnswer = bubble('assistant', '');
+    const data = await streamChat(payload, controller.signal, token => {
+      if (id !== requestSeq || !liveAnswer) return;
+      liveAnswer.answerText.data += token; convo.scrollTop = convo.scrollHeight;
+    }, isResearch ? '/api/research' : '/api/chat', progress => {
+      if (id === requestSeq) status.textContent = progress;
+    });
     if (id !== requestSeq) return;
     let answer;
-    if (isResearch) answer = bubble('assistant', data.report, data.sources || [], Boolean(data.truncated));
-    else {
+    if (isResearch) {
+      liveAnswer.answerText.data = data.report;
+      appendBubbleMetadata(liveAnswer, data.sources || [], Boolean(data.truncated));
+      answer = liveAnswer;
+    } else {
       liveAnswer.answerText.data = data.answer;
       appendBubbleMetadata(liveAnswer, data.sources || [], Boolean(data.truncated), Boolean(data.cached));
       answer = liveAnswer;

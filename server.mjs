@@ -82,7 +82,7 @@ async function ollamaChat(messages, signal, generation = {}, onToken = null) {
   if (!model || !status.models.includes(model)) throw new Error(`No matching Ollama model is installed. Available models: ${status.models.join(', ') || 'none'}.`);
   const streaming = typeof onToken === 'function';
   const response = await fetch(`${ollamaUrl}/api/chat`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(300_000)]),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(generation.timeout_ms ?? 300_000)]),
     body: JSON.stringify({ model, stream: streaming, think: false, messages, options: { num_ctx: 8192, num_predict: generation.num_predict ?? -1, num_thread: 4 } }),
   });
   if (!response.ok) {
@@ -336,19 +336,22 @@ async function handleChat(req, res, body, signal, onToken = null) {
   }
   return { ...result, sources, cached: false, live_research: useCurrentData };
 }
-async function handleResearch(body, signal) {
+async function handleResearch(body, signal, onProgress = () => {}, onToken = null) {
   const question = body.question;
   if (typeof question !== 'string' || !question.trim() || question.length > 500) throw Object.assign(new Error('Research question must contain 1 to 500 characters.'), { status: 400 });
-  const results = await webSearch(question.trim(), 5, signal);
+  onProgress('Searching for relevant sources…');
+  const results = await webSearch(question.trim(), 3, signal);
+  onProgress(`Found ${results.length} sources. Reading accessible pages…`);
   const sources = await Promise.all(results.map(async source => {
     const retrieved_at = new Date().toISOString();
-    try { return { ...source, ...await retrievePage(source.url, signal, 6000), opened: true, retrieved_at }; }
+    try { return { ...source, ...await retrievePage(source.url, signal, 1800), opened: true, retrieved_at }; }
     catch (e) { if (signal?.aborted) throw e; return { ...source, opened: false, open_error: e.message, published_at: null, retrieved_at }; }
   }));
-  const evidence = sources.map((s, i) => `[${i + 1}] ${s.title}\nURL: ${s.url}\nSearch snippet: ${s.snippet}\n${s.opened ? `Retrieved page text (may be partial): ${s.content}` : `Page not opened: ${s.open_error}`}`).join('\n\n').slice(0, 24_000);
-  const system = `${activeGuide()}\n\nYou are producing a research report from the provided search results. Search snippets are not full articles. Never claim independent verification. Distinguish facts, claims, interpretations, assumptions and uncertainty. Cite only numbered sources actually supplied as [1], [2], etc. State when pages were inaccessible; mention publication dates only when present in retrieved text. Do not invent details.`;
+  const evidence = sources.map((s, i) => `[${i + 1}] ${s.title}\nURL: ${s.url}\nSearch snippet: ${s.snippet}\n${s.opened ? `Retrieved page text (may be partial): ${s.content}` : `Page not opened: ${s.open_error}`}`).join('\n\n').slice(0, 9_000);
+  const system = `${activeGuide()}\n\nWrite a concise research brief (about 150–220 words) using only the supplied search results. Use short sections: Summary, Evidence, Uncertainty. Search snippets are not full articles; never claim independent verification. Cite factual claims with only supplied source numbers [1], [2], [3]. State when pages were inaccessible or dates unavailable. Do not invent details.`;
+  onProgress('Sources collected. MERIDIAN is drafting the brief…');
   let result;
-  try { result = await askModel([{ role: 'system', content: system }, { role: 'user', content: `Research question: ${question.trim()}\n\nRetrieved public sources:\n${evidence}` }], signal); }
+  try { result = await askModel([{ role: 'system', content: system }, { role: 'user', content: `Question: ${question.trim()}\n\nSources:\n${evidence}` }], signal, { num_predict: 200, timeout_ms: 300_000 }, onToken); }
   catch (e) { if (e.name === 'AbortError') throw e; result = { answer: `Sources were retrieved, but MERIDIAN could not synthesize them: ${e.message}`, model: 'Unavailable' }; }
   const created = Date.now();
   const saved = database.prepare('INSERT INTO reports(question,result,sources,created) VALUES(?,?,?,?)').run(question.trim(), result.answer, JSON.stringify(sources), created);
@@ -412,6 +415,23 @@ async function route(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/research') {
     const body = await readBody(req); const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    if (req.headers.accept?.includes('text/event-stream')) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+      res.flushHeaders?.();
+      const emit = event => { if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`); };
+      emit({ connected: true });
+      const keepalive = setInterval(() => { if (!res.destroyed) res.write(': meridian keepalive\n\n'); }, 15_000);
+      try {
+        const result = await handleResearch(body, controller.signal, progress => emit({ progress }), token => emit({ token }));
+        emit({ done: true, result });
+      } catch (e) {
+        if (!res.destroyed) emit({ error: e.message || 'Research request failed.' });
+      } finally {
+        clearInterval(keepalive);
+        if (!res.destroyed) res.end();
+      }
+      return;
+    }
     try { return reply(res, 200, await handleResearch(body, controller.signal)); }
     catch (e) { if (res.destroyed) return; return reply(res, e.status || (e.name === 'AbortError' ? 499 : 502), { error: e.message || 'Research request failed.' }); }
   }
