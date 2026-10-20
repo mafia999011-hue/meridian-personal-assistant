@@ -1,0 +1,1 @@
+{"name":"meridian-geopolitics-agent","version":"1.0.0","private":true,"scripts":{"start":"node --env-file=.env server.mjs"}}
