@@ -60,7 +60,7 @@ test.before(async () => {
   await mkdir(path.join(root, 'data'), { recursive: true });
   port = await freePort();
   await writeFile(path.join(root, '.env'), `PORT=${port}\nAI_PROVIDER=ollama\n`);
-  const env = { PATH: process.env.PATH || '', PORT: String(port), AI_PROVIDER: 'ollama' };
+  const env = { PATH: process.env.PATH || '', PORT: String(port), AI_PROVIDER: 'ollama', CLOUD_SHELL: 'true', WEB_HOST: 'cloudshell.example.test' };
   for (const key of ['LD_LIBRARY_PATH', 'PREFIX', 'HOME', 'TMPDIR', 'ANDROID_ROOT', 'ANDROID_DATA']) if (process.env[key]) env[key] = process.env[key];
   child = spawn(process.execPath, ['--env-file=.env', 'server.mjs'], { cwd: root, env, stdio: 'ignore' });
   await waitForServer();
@@ -117,6 +117,14 @@ test('dashboard is open directly and old login route is gone', async () => {
   assert.match(await dashboard.text(), /Situation Room/);
   const login = await request('/login');
   assert.equal(login.status, 404);
+});
+
+test('Google Cloud Shell preview host is accepted while other hosts stay blocked', async () => {
+  const previewHost = `${port}-cloudshell.example.test`;
+  const preview = await rawRequest('/api/watchlist', { host: previewHost, origin: `https://${previewHost}` });
+  assert.equal(preview.status, 200);
+  const unrelated = await rawRequest('/api/watchlist', { host: 'other-cloudshell.example.test', origin: 'https://other-cloudshell.example.test' });
+  assert.equal(unrelated.status, 403);
 });
 
 test('Quick Tunnel hostnames pass while unrelated hosts remain blocked', async () => {

@@ -80,6 +80,14 @@ Open `.env` in your preferred text editor and set `AI_PROVIDER=ollama`. Keep API
 
 You can use `AI_PROVIDER=codex` instead if the Codex CLI is installed and signed in on your machine.
 
+### Google Cloud Shell
+
+Cloud Shell requires Node 24 because MERIDIAN uses Node's built-in SQLite module. Check `node --version`; if it is older than 24 and `nvm` is available, run `nvm install 24` and `nvm use 24`. Then clone the repository, copy `.env.example` to `.env`, and set `AI_PROVIDER` to a provider you have configured. Ollama does not come bundled with Cloud Shell; use an Ollama server reachable from Cloud Shell or a configured Codex CLI provider.
+
+Start MERIDIAN with `npm start`. Cloud Shell is detected automatically: MERIDIAN binds to the interface needed by Web Preview and allows API requests only from the preview hostname supplied by Cloud Shell. In the Cloud Shell toolbar, choose **Web Preview → Preview on port 4173**. Google documents the preview URL as `https://$PORT-$WEB_HOST`; preview is served through Google's proxy and is restricted to your Google account. Do not replace this with an unauthenticated public tunnel unless you add an access-control layer.
+
+Cloud Shell's home directory normally persists between sessions, but ephemeral sessions discard their files. Keep a backup of `.env` and local database files if using an ephemeral environment.
+
 ### 4. Start MERIDIAN
 
 From the project directory, run:

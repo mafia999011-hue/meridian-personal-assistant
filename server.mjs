@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const host = '127.0.0.1';
+const host = process.env.HOST || (process.env.CLOUD_SHELL === 'true' ? '0.0.0.0' : '127.0.0.1');
 const port = Number(process.env.PORT || 4173);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer from 1 to 65535.');
 const ollamaUrl = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
@@ -82,6 +82,16 @@ function configuredOrigins() {
   });
 }
 function localHosts() { return new Set([`127.0.0.1:${port}`, `localhost:${port}`]); }
+function cloudShellPreviewHost() {
+  if (process.env.CLOUD_SHELL !== 'true') return '';
+  const webHost = (process.env.WEB_HOST || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!webHost || /[^a-z0-9.-]/.test(webHost)) return '';
+  try {
+    const parsed = new URL(`https://${webHost}`);
+    if (parsed.hostname !== webHost || parsed.port || parsed.username || parsed.password) return '';
+    return `${port}-${webHost}`;
+  } catch { return ''; }
+}
 function isCloudflareQuickTunnelHost(hostname) {
   const normalized = String(hostname || '').toLowerCase().replace(/\.$/, '');
   return normalized.endsWith('.trycloudflare.com');
@@ -98,11 +108,15 @@ function assertSameOrigin(req) {
   const isLocalOrigin = parsed.protocol === 'http:' && local.has(parsed.host.toLowerCase()) && local.has(requestHost);
   const isConfiguredOrigin = configuredOrigins().some(allowed => allowed.origin === parsed.origin && (requestHost === allowed.host.toLowerCase() || local.has(requestHost)));
   const isQuickTunnelOrigin = parsed.protocol === 'https:' && isCloudflareQuickTunnelHost(parsed.hostname) && requestHost === parsed.host.toLowerCase();
-  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin && !isQuickTunnelOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
+  const previewHost = cloudShellPreviewHost();
+  const isCloudShellOrigin = parsed.protocol === 'https:' && Boolean(previewHost) && parsed.host.toLowerCase() === previewHost && requestHost === previewHost;
+  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin && !isQuickTunnelOrigin && !isCloudShellOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
 }
 function assertRequestBoundary(req) {
   const requestHost = String(req.headers.host || '').toLowerCase();
   const allowedHosts = localHosts();
+  const previewHost = cloudShellPreviewHost();
+  if (previewHost) allowedHosts.add(previewHost);
   for (const origin of configuredOrigins()) allowedHosts.add(origin.host.toLowerCase());
   const parsedHost = requestHost.startsWith('[') ? '' : requestHost.split(':')[0];
   if (!allowedHosts.has(requestHost) && !isCloudflareQuickTunnelHost(parsedHost)) throw Object.assign(new Error('Unrecognized request host.'), { status: 403 });
