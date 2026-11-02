@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const host = '127.0.0.1';
+const host = process.env.HOST || (process.env.CLOUD_SHELL === 'true' ? '0.0.0.0' : '127.0.0.1');
 const port = Number(process.env.PORT || 4173);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer from 1 to 65535.');
 const ollamaUrl = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
@@ -82,6 +82,16 @@ function configuredOrigins() {
   });
 }
 function localHosts() { return new Set([`127.0.0.1:${port}`, `localhost:${port}`]); }
+function cloudShellPreviewHost() {
+  if (process.env.CLOUD_SHELL !== 'true') return '';
+  const webHost = (process.env.WEB_HOST || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!webHost || /[^a-z0-9.-]/.test(webHost)) return '';
+  try {
+    const parsed = new URL(`https://${webHost}`);
+    if (parsed.hostname !== webHost || parsed.port || parsed.username || parsed.password) return '';
+    return `${port}-${webHost}`;
+  } catch { return ''; }
+}
 function isCloudflareQuickTunnelHost(hostname) {
   const normalized = String(hostname || '').toLowerCase().replace(/\.$/, '');
   return normalized.endsWith('.trycloudflare.com');
@@ -98,11 +108,15 @@ function assertSameOrigin(req) {
   const isLocalOrigin = parsed.protocol === 'http:' && local.has(parsed.host.toLowerCase()) && local.has(requestHost);
   const isConfiguredOrigin = configuredOrigins().some(allowed => allowed.origin === parsed.origin && (requestHost === allowed.host.toLowerCase() || local.has(requestHost)));
   const isQuickTunnelOrigin = parsed.protocol === 'https:' && isCloudflareQuickTunnelHost(parsed.hostname) && requestHost === parsed.host.toLowerCase();
-  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin && !isQuickTunnelOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
+  const previewHost = cloudShellPreviewHost();
+  const isCloudShellOrigin = parsed.protocol === 'https:' && Boolean(previewHost) && parsed.host.toLowerCase() === previewHost && requestHost === previewHost;
+  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin && !isQuickTunnelOrigin && !isCloudShellOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
 }
 function assertRequestBoundary(req) {
   const requestHost = String(req.headers.host || '').toLowerCase();
   const allowedHosts = localHosts();
+  const previewHost = cloudShellPreviewHost();
+  if (previewHost) allowedHosts.add(previewHost);
   for (const origin of configuredOrigins()) allowedHosts.add(origin.host.toLowerCase());
   const parsedHost = requestHost.startsWith('[') ? '' : requestHost.split(':')[0];
   if (!allowedHosts.has(requestHost) && !isCloudflareQuickTunnelHost(parsedHost)) throw Object.assign(new Error('Unrecognized request host.'), { status: 403 });
@@ -118,19 +132,20 @@ const expensiveRouteState = new Map();
 const expensiveRouteActive = new Map();
 function enforceRequestLimit(res, pathname) {
   const watchCheck = /^\/api\/watchlist\/\d+\/check$/.test(pathname);
-  const policy = expensiveRouteLimits.get(watchCheck ? '/api/watchlist/check' : pathname);
+  const key = watchCheck ? '/api/watchlist/check' : pathname;
+  const policy = expensiveRouteLimits.get(key);
   if (!policy) return;
   const now = Date.now(), windowMs = 60_000;
-  let state = expensiveRouteState.get(pathname);
+  let state = expensiveRouteState.get(key);
   if (!state || now - state.startedAt >= windowMs) state = { startedAt: now, count: 0 };
-  const active = expensiveRouteActive.get(pathname) || 0;
+  const active = expensiveRouteActive.get(key) || 0;
   if (state.count >= policy.requests || active >= policy.concurrent) {
-    expensiveRouteState.set(pathname, state);
+    expensiveRouteState.set(key, state);
     throw Object.assign(new Error('Request limit reached. Wait briefly and try again.'), { status: 429 });
   }
-  state.count += 1; expensiveRouteState.set(pathname, state); expensiveRouteActive.set(pathname, active + 1);
+  state.count += 1; expensiveRouteState.set(key, state); expensiveRouteActive.set(key, active + 1);
   let released = false;
-  const release = () => { if (released) return; released = true; expensiveRouteActive.set(pathname, Math.max(0, (expensiveRouteActive.get(pathname) || 1) - 1)); };
+  const release = () => { if (released) return; released = true; expensiveRouteActive.set(key, Math.max(0, (expensiveRouteActive.get(key) || 1) - 1)); };
   res.once('finish', release); res.once('close', release);
 }
 async function readBody(req, max = 100_000) {
@@ -721,10 +736,14 @@ async function refreshWatch(watch) {
   }
 }
 let scheduledWatchChecksRunning = false;
+function pruneWatchEvents() {
+  database.prepare('DELETE FROM watch_events WHERE created < ?').run(Date.now() - 30 * 24 * 60 * 60 * 1000);
+}
 async function runScheduledWatchChecks() {
   if (scheduledWatchChecksRunning) return;
   scheduledWatchChecksRunning = true;
   try {
+    pruneWatchEvents();
     const due = database.prepare('SELECT * FROM watches WHERE next_check <= ? ORDER BY next_check LIMIT 8').all(Date.now());
     for (const watch of due) await refreshWatch(watch);
   } finally { scheduledWatchChecksRunning = false; }
@@ -800,6 +819,12 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/models') {
     const status = await ollamaStatus(); return reply(res, 200, status);
   }
+  if (req.method === 'GET' && url.pathname === '/aviation') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'aviation.html'), 'utf8'), 'text/html; charset=utf-8'); } catch { return reply(res, 500, 'Aviation page unavailable', 'text/plain'); }
+  }
+  if (req.method === 'GET' && url.pathname === '/aviation.js') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'static', 'aviation.js'), 'utf8'), 'text/javascript; charset=utf-8'); } catch { return reply(res, 404, { error: 'Aviation script unavailable.' }); }
+  }
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     try { return reply(res, 200, await readFile(path.join(dir, 'index.html'), 'utf8'), 'text/html; charset=utf-8'); } catch { return reply(res, 500, 'UI unavailable', 'text/plain'); }
   }
@@ -821,6 +846,7 @@ async function route(req, res) {
     return reply(res, 200, { results: librarySearch(url.searchParams.get('q') || '') });
   }
   if (req.method === 'GET' && url.pathname === '/api/watchlist') {
+    pruneWatchEvents();
     const watches = database.prepare('SELECT id,kind,query,created,next_check,last_checked,latest,last_error FROM watches ORDER BY created DESC').all().map(watch => ({ ...watch, latest: watch.latest ? JSON.parse(watch.latest) : [] }));
     const alerts = database.prepare('SELECT e.id,e.watch_id,e.summary,e.url,e.created,w.kind,w.query FROM watch_events e JOIN watches w ON w.id=e.watch_id ORDER BY e.created DESC LIMIT 20').all();
     return reply(res, 200, { watches, alerts, interval_minutes: 60 });

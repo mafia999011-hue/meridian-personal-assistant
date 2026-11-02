@@ -4,7 +4,7 @@ The existing Node MERIDIAN app now includes local Ollama support, public web res
 
 ## Install on Linux, macOS, or Windows
 
-MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported runtime because the app uses Node's built-in SQLite module. The project has no npm dependencies to install.
+MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported runtime because the app uses Node's built-in SQLite module. The project has no npm dependencies to install. Run `npm test` to execute the built-in Node integration checks.
 
 ### 1. Install Node.js and Git
 
@@ -79,6 +79,14 @@ cp .env.example .env
 Open `.env` in your preferred text editor and set `AI_PROVIDER=ollama`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys. The API rejects unrecognized hosts and cross-site browser requests and applies per-route request and concurrency limits. MERIDIAN has no built-in sign-in: anyone who can reach its URL can access the dashboard, saved data, and API features. Keep it local or place it behind Cloudflare Access or another access-control proxy before sharing it publicly. For a custom HTTPS hostname, list its exact origin(s), comma-separated, in `MERIDIAN_ALLOWED_ORIGINS`. Never commit `.env` or expose API keys.
 
 You can use `AI_PROVIDER=codex` instead if the Codex CLI is installed and signed in on your machine.
+
+### Google Cloud Shell
+
+Cloud Shell requires Node 24 because MERIDIAN uses Node's built-in SQLite module. Check `node --version`; if it is older than 24 and `nvm` is available, run `nvm install 24` and `nvm use 24`. Then clone the repository, copy `.env.example` to `.env`, and set `AI_PROVIDER` to a provider you have configured. Ollama does not come bundled with Cloud Shell; use an Ollama server reachable from Cloud Shell or a configured Codex CLI provider.
+
+Start MERIDIAN with `npm start`. Cloud Shell is detected automatically: MERIDIAN binds to the interface needed by Web Preview and allows API requests only from the preview hostname supplied by Cloud Shell. In the Cloud Shell toolbar, choose **Web Preview → Preview on port 4173**. Google documents the preview URL as `https://$PORT-$WEB_HOST`; preview is served through Google's proxy and is restricted to your Google account. Do not replace this with an unauthenticated public tunnel unless you add an access-control layer.
+
+Cloud Shell's home directory normally persists between sessions, but ephemeral sessions discard their files. Keep a backup of `.env` and local database files if using an ephemeral environment.
 
 ### 4. Start MERIDIAN
 
