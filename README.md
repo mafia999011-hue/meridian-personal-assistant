@@ -35,7 +35,7 @@ Set `MEDIASTACK_ACCESS_KEY` in `.env` to load sourced geopolitical headlines on 
 
 ## Aviation tracking
 
-Set `AVIATIONSTACK_ACCESS_KEY` in `.env` to enable the Live Aviation Tracker. It can query active flights, a flight number, departures from an airport, or arrivals to an airport. Flight data is requested on demand to avoid unnecessary API usage; provider timestamps, positions, and filtering depend on your Aviationstack plan. The key remains server-side.
+Set a valid Aviationstack-specific `AVIATIONSTACK_ACCESS_KEY` in `.env` to enable the Live Aviation Tracker. Aviationstack and Mediastack issue separate keys; do not reuse one provider's key for the other. Restart MERIDIAN after editing `.env`. It can query active flights, a flight number, departures from an airport, or arrivals to an airport. Flight data is requested on demand to avoid unnecessary API usage; provider timestamps, positions, and filtering depend on your Aviationstack plan. The key remains server-side.
 
 ## Research and library
 

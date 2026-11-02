@@ -192,7 +192,10 @@ async function loadFlights(event) {
     }
     if (!data.flights.length) results.textContent = 'No matching flights returned. Try a different flight or airport code.';
     status.textContent = `${data.flights.length} SHOWN · ${data.total} MATCHING · RETRIEVED ${new Date(data.retrieved_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
-  } catch (error) { results.textContent = error.message; status.textContent = 'FLIGHT DATA UNAVAILABLE'; }
+  } catch (error) {
+    results.textContent = error.message;
+    status.textContent = /AVIATIONSTACK_KEY_REJECTED|Aviationstack rejected its configured key/i.test(error.message) ? 'AVIATIONSTACK KEY REJECTED · CHECK .ENV' : 'FLIGHT DATA UNAVAILABLE';
+  }
 }
 async function loadSignals() {
   const status = $('#signalsStatus'), list = $('#signals');
@@ -224,7 +227,7 @@ async function loadHealth() {
     $('#serviceBadge').textContent = `● LOCAL INTERFACE · ${String(data.provider).toUpperCase()}${ollama.available ? (ollama.models.length ? ` · OLLAMA ${ollama.selected_model}` : ' · OLLAMA HAS NO MODEL') : ''}`;
     $('#ollamaStatus').textContent = ollama.available ? (ollama.models.length ? `Local Ollama ready: ${ollama.models.join(', ')}` : 'Ollama API responds, but no model is installed.') : ollama.message;
     if (!data.mediastack) $('#signalsStatus').textContent = 'KEY NEEDED · MEDIASTACK_ACCESS_KEY';
-    if (!data.aviationstack) $('#flightStatus').textContent = 'KEY NEEDED · AVIATIONSTACK_ACCESS_KEY';
+    $('#flightStatus').textContent = data.aviationstack ? 'KEY SET · VERIFIED WHEN FETCHED' : 'KEY NEEDED · AVIATIONSTACK_ACCESS_KEY';
   } catch (error) { $('#serviceBadge').textContent = '● BACKEND STATUS UNAVAILABLE'; $('#ollamaStatus').textContent = error.message; }
 }
 async function loadLibrary() {

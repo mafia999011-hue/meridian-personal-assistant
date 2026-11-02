@@ -384,7 +384,13 @@ async function route(req, res) {
     try {
       const response = await fetch(`https://api.aviationstack.com/v1/flights?${params}`, { signal: AbortSignal.timeout(12_000) });
       const data = await response.json().catch(() => ({}));
-      if (data.error) return reply(res, 502, { error: `Aviationstack: ${data.error.info || data.error.message || data.error.code || 'request failed'}` });
+      if (data.error) {
+        const info = data.error.info || data.error.message || data.error.code || 'request failed';
+        if (/not supplied a valid api access key|invalid api access key/i.test(info)) {
+          return reply(res, 502, { code: 'AVIATIONSTACK_KEY_REJECTED', error: 'Aviationstack rejected its configured key. Add a valid Aviationstack key to AVIATIONSTACK_ACCESS_KEY in .env. Aviationstack and Mediastack require separate keys, then restart MERIDIAN.' });
+        }
+        return reply(res, 502, { error: `Aviationstack: ${info}` });
+      }
       if (!response.ok) return reply(res, 502, { error: `Aviationstack returned HTTP ${response.status}.` });
       return reply(res, 200, { retrieved_at: new Date().toISOString(), total: data.pagination?.total ?? data.data?.length ?? 0, flights: (data.data || []).slice(0, 10) });
     } catch (error) {
