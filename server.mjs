@@ -1,10 +1,13 @@
 import http from 'node:http';
+import https from 'node:https';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -13,7 +16,15 @@ const port = Number(process.env.PORT || 4173);
 const ollamaUrl = (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
 const dataDir = path.join(dir, 'data');
 const libraryDir = path.join(dataDir, 'library');
-await mkdir(libraryDir, { recursive: true });
+await mkdir(dataDir, { recursive: true, mode: 0o700 });
+await mkdir(libraryDir, { recursive: true, mode: 0o700 });
+if (process.platform !== 'win32') {
+  await chmod(dataDir, 0o700);
+  await chmod(libraryDir, 0o700);
+  for (const entry of await readdir(libraryDir, { withFileTypes: true })) {
+    if (entry.isFile()) await chmod(path.join(libraryDir, entry.name), 0o600);
+  }
+}
 const readingNotes = await readFile(path.join(dir, 'library.md'), 'utf8');
 const masterPrompt = await readFile(path.join(dir, 'master-prompt.md'), 'utf8');
 const guide = `${masterPrompt}\n\nAdditional reference notes: The following curated book notes are loaded as prompt context, not full book texts. Attribute ideas accurately and cite links.\n\n${readingNotes}`;
@@ -21,7 +32,8 @@ const localGuide = 'You are MERIDIAN, the user’s capable, candid personal AI a
 function activeGuide() { return (process.env.AI_PROVIDER || 'codex').toLowerCase() === 'ollama' ? localGuide : guide; }
 const modes = new Set(['General Analysis', 'Historical Book Analysis', 'Geopolitical Debate', 'Intelligence Assessment', 'Strategic Scenario', 'Forecasting', 'Market Analysis']);
 
-const database = new DatabaseSync(path.join(dataDir, 'meridian.sqlite3'));
+const databasePath = path.join(dataDir, 'meridian.sqlite3');
+const database = new DatabaseSync(databasePath);
 let mediaStackCache = { expiresAt: 0, payload: null };
 database.exec(`
   CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, mode TEXT NOT NULL, created INTEGER NOT NULL);
@@ -30,10 +42,56 @@ database.exec(`
   CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, body TEXT NOT NULL, FOREIGN KEY(document_id) REFERENCES documents(id));
   CREATE TABLE IF NOT EXISTS answer_cache(cache_key TEXT PRIMARY KEY, answer TEXT NOT NULL, model TEXT NOT NULL, sources TEXT NOT NULL, created INTEGER NOT NULL);
 `);
+if (process.platform !== 'win32') await chmod(databasePath, 0o600);
 
+function redactSecrets(value) {
+  if (typeof value === 'string') {
+    let safe = value;
+    for (const [name, secret] of Object.entries(process.env)) {
+      if (/(?:API[_-]?KEY|ACCESS[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name) && secret && secret.length >= 6) safe = safe.split(secret).join('[REDACTED]');
+    }
+    return safe;
+  }
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecrets(item)]));
+  return value;
+}
 function reply(res, status, data, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  data = redactSecrets(data);
+  res.writeHead(status, {
+    'Content-Type': type,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self)',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  });
   res.end(type.startsWith('application/json') ? JSON.stringify(data) : data);
+}
+function assertSameOrigin(req) {
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+    throw Object.assign(new Error('Cross-site requests are not allowed.'), { status: 403 });
+  }
+  const origin = req.headers.origin;
+  if (!origin) return;
+  let parsed;
+  try { parsed = new URL(origin); } catch { throw Object.assign(new Error('Invalid request origin.'), { status: 403 }); }
+  const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+  const requestHost = String(req.headers.host || '').toLowerCase();
+  const isLocalOrigin = parsed.protocol === 'http:' && localHosts.has(parsed.host.toLowerCase()) && localHosts.has(requestHost);
+  const configuredOrigins = (process.env.MERIDIAN_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
+  const isConfiguredOrigin = configuredOrigins.some(value => {
+    try {
+      const allowed = new URL(value);
+      return allowed.origin === parsed.origin && ['http:', 'https:'].includes(allowed.protocol) &&
+        (requestHost === allowed.host.toLowerCase() || localHosts.has(requestHost));
+    } catch { return false; }
+  });
+  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin)) {
+    throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
+  }
 }
 async function readBody(req, max = 100_000) {
   const parts = []; let size = 0;
@@ -58,12 +116,12 @@ async function ollamaStatus() {
   try {
     const r = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(1800) });
     if (!r.ok) throw new Error(`Ollama returned HTTP ${r.status}`);
-    const data = await r.json();
+    const data = await readFetchJsonLimited(r, 256_000);
     const models = Array.isArray(data.models) ? data.models.map(x => x?.name).filter(Boolean) : [];
     const selected = process.env.OLLAMA_MODEL || models[0] || '';
     return { available: true, models, selected_model: selected, message: models.length ? 'Ollama ready' : 'Ollama is running, but no models are installed.' };
   } catch (e) {
-    return { available: false, models: [], selected_model: process.env.OLLAMA_MODEL || '', message: `Ollama unavailable at ${ollamaUrl}: ${e.message}` };
+    return { available: false, models: [], selected_model: process.env.OLLAMA_MODEL || '', message: 'Ollama is unavailable. Check the local Ollama service and configured URL.' };
   }
 }
 function modeGuide(mode) {
@@ -87,7 +145,7 @@ async function ollamaChat(messages, signal, generation = {}, onToken = null) {
     body: JSON.stringify({ model, stream: streaming, think: false, messages, options: { num_ctx: 8192, num_predict: generation.num_predict ?? -1, num_thread: 4 } }),
   });
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
+    const data = await readFetchJsonLimited(response).catch(() => ({}));
     const detail = (data.error || 'request failed').slice(0, 400);
     if (/llama-server process has terminated|cannot locate symbol/i.test(detail)) {
       throw new Error('Ollama API is reachable, but its Termux model runner failed. Stop the current Ollama server and restart it with: LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH" ollama serve');
@@ -95,7 +153,7 @@ async function ollamaChat(messages, signal, generation = {}, onToken = null) {
     throw new Error(`Ollama returned HTTP ${response.status}: ${detail}`);
   }
   if (!streaming) {
-    const data = await response.json().catch(() => ({}));
+    const data = await readFetchJsonLimited(response).catch(() => ({}));
     const answer = data.message?.content;
     if (typeof answer !== 'string' || !answer.trim()) throw new Error('Ollama returned an empty response.');
     return { answer, model: data.model || model, truncated: data.done_reason === 'length' };
@@ -124,25 +182,49 @@ async function ollamaChat(messages, signal, generation = {}, onToken = null) {
 }
 function codexChat(prompt, signal) {
   return new Promise((resolve, reject) => {
-    const child = spawn('codex', ['exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '-'], {
-      cwd: dir, stdio: ['pipe', 'pipe', 'pipe'], env: process.env,
-    });
-    let output = '', errors = '', done = false;
-    const finish = (err, value) => { if (done) return; done = true; signal?.removeEventListener('abort', abort); err ? reject(err) : resolve(value); };
-    const abort = () => { child.kill('SIGTERM'); finish(Object.assign(new Error('Request interrupted.'), { name: 'AbortError' })); };
+    let child = null, workDir = '', output = '', done = false;
+    const finish = (err, value) => {
+      if (done) return;
+      done = true;
+      signal?.removeEventListener('abort', abort);
+      const settle = () => err ? reject(err) : resolve(value);
+      if (workDir) rm(workDir, { recursive: true, force: true }).then(settle, settle);
+      else settle();
+    };
+    const abort = () => { child?.kill('SIGTERM'); finish(Object.assign(new Error('Request interrupted.'), { name: 'AbortError' })); };
     if (signal?.aborted) return abort();
     signal?.addEventListener('abort', abort, { once: true });
-    child.stdout.setEncoding('utf8').on('data', x => { output += x; if (output.length > 30_000) child.kill(); });
-    child.stderr.setEncoding('utf8').on('data', x => { errors = (errors + x).slice(-8000); });
-    child.on('error', () => finish(new Error('Could not start Codex. Check that the CLI is installed and signed in.')));
-    child.on('close', code => {
-      if (done) return;
-      if (code !== 0 || !output.trim()) return finish(new Error(errors.trim().slice(-1200) || 'The agent could not complete the response. Check your Codex login.'));
-      finish(null, { answer: output.trim(), model: 'Codex CLI' });
-    });
-    child.stdin.end(prompt);
-    const timer = setTimeout(() => child.kill('SIGTERM'), 120_000);
-    child.on('close', () => clearTimeout(timer));
+    (async () => {
+      try {
+        workDir = await mkdtemp(path.join(os.tmpdir(), 'meridian-codex-'));
+        if (done) { await rm(workDir, { recursive: true, force: true }); return; }
+        const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/(?:API[_-]?KEY|ACCESS[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)));
+        const codexArgs = [
+          'exec', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config',
+          '--config', 'default_permissions=\"meridian-chat\"',
+          '--config', 'permissions.meridian-chat.filesystem.\":root\"=\"deny\"',
+          '--config', 'permissions.meridian-chat.filesystem.\":minimal\"=\"read\"',
+          '--config', 'permissions.meridian-chat.filesystem.\":workspace_roots\"=\"read\"',
+          '-'
+        ];
+        child = spawn('codex', codexArgs, {
+          cwd: workDir, stdio: ['pipe', 'pipe', 'pipe'], env,
+        });
+        child.stdout.setEncoding('utf8').on('data', x => { output += x; if (output.length > 30_000) child.kill(); });
+        child.stderr.resume();
+        child.on('error', () => finish(new Error('Could not start Codex. Check that the CLI is installed and signed in.')));
+        child.on('close', code => {
+          if (done) return;
+          if (code !== 0 || !output.trim()) return finish(new Error('The agent could not complete the response. Check your Codex login.'));
+          finish(null, { answer: output.trim(), model: 'Codex CLI' });
+        });
+        child.stdin.end(prompt);
+        const timer = setTimeout(() => child.kill('SIGTERM'), 120_000);
+        child.on('close', () => clearTimeout(timer));
+      } catch {
+        finish(new Error('Could not start the isolated Codex process.'));
+      }
+    })();
   });
 }
 async function askModel(messages, signal, generation = {}, onToken = null) {
@@ -151,14 +233,17 @@ async function askModel(messages, signal, generation = {}, onToken = null) {
   return codexChat(`${messages[0].content}\n\n${serialized}\n\nRespond as Meridian.`, signal);
 }
 function decodeEntities(s) {
-  return s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&#x27;/gi, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+  return s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&#x27;/gi, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);|&#x([\da-f]+);/gi, (match, decimal, hex) => {
+    const point = decimal ? Number(decimal) : parseInt(hex, 16);
+    return Number.isInteger(point) && point >= 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : match;
+  });
 }
 function cleanHtml(s) { return decodeEntities(s.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()); }
 async function webSearch(query, limit = 5, signal) {
   const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
   const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MeridianResearch/1.0)', 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(12_000)]) });
   if (!r.ok) throw new Error(`Web search returned HTTP ${r.status}.`);
-  const html = (await r.text()).slice(0, 2_000_000), rows = [];
+  const html = await readFetchTextLimited(r, 2_000_000), rows = [];
   const re = /<a\b([^>]*class=['"][^'"]*\bresult-link\b[^'"]*['"][^>]*)>([\s\S]*?)<\/a>/gi;
   for (const match of html.matchAll(re)) {
     const href = match[1].match(/\bhref=['"]([^'"]+)['"]/i)?.[1];
@@ -173,14 +258,141 @@ async function webSearch(query, limit = 5, signal) {
   if (!rows.length) throw new Error('Search returned no readable results. The provider may have blocked this request.');
   return rows;
 }
-async function retrievePage(url, signal, textLimit = 3200) {
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)) throw new Error('Source URL is not an allowed public HTTPS page.');
-  const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MeridianResearch/1.0)' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(10_000)]) });
-  const finalUrl = new URL(response.url);
-  if (!response.ok) throw new Error(`Source returned HTTP ${response.status}.`);
-  if (finalUrl.protocol !== 'https:' || !response.headers.get('content-type')?.includes('text/html')) throw new Error('Source did not return an HTTPS HTML page.');
-  const html = (await response.text()).slice(0, 1_500_000);
+function ipv4Number(address) {
+  const parts = address.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(x => !Number.isInteger(x) || x < 0 || x > 255)) return null;
+  return parts.reduce((n, x) => (n << 8n) | BigInt(x), 0n);
+}
+function inIPv4Range(address, network, bits) {
+  const ip = ipv4Number(address), base = ipv4Number(network);
+  if (ip === null || base === null) return true;
+  const shift = BigInt(32 - bits);
+  return (ip >> shift) === (base >> shift);
+}
+function ipv6Words(address) {
+  let input = address.toLowerCase().split('%')[0];
+  if (input.includes('.')) {
+    const lastColon = input.lastIndexOf(':');
+    const v4 = ipv4Number(input.slice(lastColon + 1));
+    if (v4 === null) return null;
+    input = `${input.slice(0, lastColon)}:${((v4 >> 16n) & 0xffffn).toString(16)}:${(v4 & 0xffffn).toString(16)}`;
+  }
+  const chunks = input.split('::');
+  if (chunks.length > 2) return null;
+  const left = chunks[0] ? chunks[0].split(':') : [];
+  const right = chunks.length === 2 && chunks[1] ? chunks[1].split(':') : [];
+  const missing = 8 - left.length - right.length;
+  if (missing < (chunks.length === 2 ? 1 : 0)) return null;
+  const words = [...left, ...Array(missing).fill('0'), ...right].map(x => /^[0-9a-f]{1,4}$/.test(x) ? parseInt(x, 16) : NaN);
+  return words.length === 8 && words.every(Number.isFinite) ? words : null;
+}
+function isPublicAddress(address) {
+  const family = isIP(address);
+  if (family === 4) {
+    const blocked = [
+      ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+      ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+      ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
+      ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+    ];
+    return !blocked.some(([network, bits]) => inIPv4Range(address, network, bits));
+  }
+  if (family !== 6) return false;
+  const words = ipv6Words(address);
+  if (!words) return false;
+  if (words.slice(0, 5).every(x => x === 0) && words[5] === 0xffff) {
+    return isPublicAddress(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+  }
+  // Permit global-unicast 2000::/3 only; exclude special, documentation, and 6to4 ranges.
+  if ((words[0] & 0xe000) !== 0x2000) return false;
+  if (words[0] === 0x2001 && (words[1] <= 0x01ff || words[1] === 0x0db8)) return false;
+  if (words[0] === 0x2002) return false;
+  return true;
+}
+async function resolvePublicHttpsUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error('Source URL is invalid.'); }
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443') || !hostname ||
+      ['localhost', 'localhost.localdomain'].includes(hostname) || /\.(?:localhost|local|internal|test|invalid|example)$/.test(hostname)) {
+    throw new Error('Source URL is not an allowed public HTTPS page.');
+  }
+  let addresses;
+  if (isIP(hostname)) addresses = [{ address: hostname, family: isIP(hostname) }];
+  else {
+    try { addresses = await lookup(hostname, { all: true, verbatim: true }); }
+    catch { throw new Error('Source hostname could not be resolved.'); }
+  }
+  if (!addresses.length || addresses.some(x => !isPublicAddress(x.address))) throw new Error('Source host resolves to a non-public network address.');
+  return { url, address: addresses[0] };
+}
+function requestPinnedHttps(url, address, signal) {
+  return new Promise((resolve, reject) => {
+    const controllerSignal = AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(10_000)]);
+    const request = https.request(url, {
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MeridianResearch/1.0)', Accept: 'text/html' },
+      signal: controllerSignal,
+      lookup: (_host, options, callback) => options?.all ? callback(null, [address]) : callback(null, address.address, address.family),
+    }, resolve);
+    request.on('error', reject);
+    request.end();
+  });
+}
+async function readFetchTextLimited(response, maxBytes) {
+  if (!response.body) return '';
+  const reader = response.body.getReader(), chunks = []; let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) { await reader.cancel(); throw new Error('Provider response exceeded the allowed size.'); }
+      chunks.push(Buffer.from(value));
+    }
+  } finally { reader.releaseLock(); }
+  return Buffer.concat(chunks).toString('utf8');
+}
+async function readFetchJsonLimited(response, maxBytes = 2_000_000) {
+  const text = await readFetchTextLimited(response, maxBytes);
+  try { return JSON.parse(text); } catch { return {}; }
+}
+function readResponseLimited(response, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0, settled = false;
+    response.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        settled = true; response.destroy(); reject(new Error('Source response exceeded the allowed size.')); return;
+      }
+      chunks.push(chunk);
+    });
+    response.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
+    response.on('error', error => { if (!settled) { settled = true; reject(error); } });
+  });
+}
+async function retrievePage(value, signal, textLimit = 3200) {
+  let current = value, response, finalUrl;
+  for (let redirects = 0; redirects <= 4; redirects++) {
+    const destination = await resolvePublicHttpsUrl(current);
+    response = await requestPinnedHttps(destination.url, destination.address, signal);
+    finalUrl = destination.url;
+    const location = response.headers.location;
+    if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+      response.destroy();
+      if (redirects === 4) throw new Error('Source exceeded the redirect limit.');
+      current = new URL(location, finalUrl).href;
+      continue;
+    }
+    break;
+  }
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    response.destroy();
+    throw new Error(`Source returned HTTP ${response.statusCode}.`);
+  }
+  const contentType = String(response.headers['content-type'] || '').toLowerCase();
+  if (!contentType.includes('text/html')) { response.destroy(); throw new Error('Source did not return an HTTPS HTML page.'); }
+  const html = await readResponseLimited(response, 1_500_000);
   let published_at = null;
   for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
     const tag = match[0];
@@ -197,8 +409,9 @@ async function retrievePage(url, signal, textLimit = 3200) {
   if (content.length < 240 || /access denied|verify you are human|enable javascript|enable cookies|robot check/i.test(content)) {
     throw new Error('The publisher returned an access wall instead of readable article text.');
   }
-  return { content, published_at };
+  return { content, published_at, url: finalUrl.href };
 }
+
 function needsCurrentData(message, mode) {
   if (mode === 'Market Analysis') return true;
   if (mode === 'Historical Book Analysis') return false;
@@ -251,7 +464,7 @@ function recognizedMarketSymbols(question) {
 async function marketQuote(symbol, signal) {
   const endpoint = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=5m`;
   const response = await fetch(endpoint, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MeridianMarketResearch/1.0)' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(8_000)]) });
-  const data = await response.json().catch(() => ({}));
+  const data = await readFetchJsonLimited(response).catch(() => ({}));
   if (!response.ok) throw new Error(`Yahoo Finance returned HTTP ${response.status}.`);
   const quote = data.chart?.result?.[0];
   if (!quote?.meta || quote.chartPreviousClose == null && quote.meta.previousClose == null) throw new Error(data.chart?.error?.description || `No quote data for ${symbol}.`);
@@ -275,7 +488,7 @@ async function fetchMarketSources(question, signal) {
     const searchText = question.replace(/\b(analy[sz]e|latest|current|today|market analysis|stock price|share price)\b/gi, ' ').trim();
     const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(searchText || question)}&quotesCount=5&newsCount=0`;
     const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MeridianMarketResearch/1.0)' }, signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(8_000)]) });
-    const data = await response.json().catch(() => ({}));
+    const data = await readFetchJsonLimited(response).catch(() => ({}));
     if (!response.ok) throw new Error(`Yahoo Finance symbol search returned HTTP ${response.status}.`);
     symbols = (data.quotes || []).filter(x => x.symbol && ['EQUITY', 'ETF', 'INDEX', 'CURRENCY', 'FUTURE', 'CRYPTOCURRENCY'].includes(x.quoteType)).slice(0, 3).map(x => x.symbol);
   }
@@ -382,14 +595,14 @@ async function route(req, res) {
       if (type === 'departures') params.set('flight_status', 'active');
     }
     try {
-      const response = await fetch(`https://api.aviationstack.com/v1/flights?${params}`, { signal: AbortSignal.timeout(12_000) });
-      const data = await response.json().catch(() => ({}));
+      const response = await fetch(`https://api.aviationstack.com/v1/flights?${params}`, { redirect: 'error', signal: AbortSignal.timeout(12_000) });
+      const data = await readFetchJsonLimited(response).catch(() => ({}));
       if (data.error) {
         const info = data.error.info || data.error.message || data.error.code || 'request failed';
         if (/not supplied a valid api access key|invalid api access key/i.test(info)) {
           return reply(res, 502, { code: 'AVIATIONSTACK_KEY_REJECTED', error: 'Aviationstack rejected its configured key. Add a valid Aviationstack key to AVIATIONSTACK_ACCESS_KEY in .env. Aviationstack and Mediastack require separate keys, then restart MERIDIAN.' });
         }
-        return reply(res, 502, { error: `Aviationstack: ${info}` });
+        return reply(res, 502, { error: 'Aviationstack rejected the request. Check the configured key and provider plan.' });
       }
       if (!response.ok) return reply(res, 502, { error: `Aviationstack returned HTTP ${response.status}.` });
       return reply(res, 200, { retrieved_at: new Date().toISOString(), total: data.pagination?.total ?? data.data?.length ?? 0, flights: (data.data || []).slice(0, 10) });
@@ -403,9 +616,9 @@ async function route(req, res) {
     if (mediaStackCache.payload && mediaStackCache.expiresAt > Date.now()) return reply(res, 200, mediaStackCache.payload);
     try {
       const params = new URLSearchParams({ access_key: accessKey, keywords: 'geopolitics OR diplomacy OR conflict OR sanctions OR energy security', languages: 'en', sort: 'published_desc', limit: '8' });
-      const response = await fetch(`https://api.mediastack.com/v1/news?${params}`, { signal: AbortSignal.timeout(12_000) });
-      const data = await response.json().catch(() => ({}));
-      if (data.error) return reply(res, 502, { error: `Mediastack: ${data.error.message || data.error.code || 'request failed'}` });
+      const response = await fetch(`https://api.mediastack.com/v1/news?${params}`, { redirect: 'error', signal: AbortSignal.timeout(12_000) });
+      const data = await readFetchJsonLimited(response).catch(() => ({}));
+      if (data.error) return reply(res, 502, { error: 'Mediastack rejected the request. Check the configured key and provider plan.' });
       if (!response.ok) return reply(res, 502, { error: `Mediastack returned HTTP ${response.status}.` });
       const retrieved_at = new Date().toISOString();
       const signals = (data.data || []).map(article => {
@@ -432,6 +645,7 @@ async function route(req, res) {
     const rows = database.prepare('SELECT id,role,content,mode,created FROM messages ORDER BY id DESC LIMIT 100').all().reverse(); return reply(res, 200, { messages: rows });
   }
   if (req.method === 'DELETE' && url.pathname === '/api/history') {
+    assertSameOrigin(req);
     database.prepare('DELETE FROM messages').run();
     return reply(res, 200, { ok: true });
   }
@@ -450,6 +664,7 @@ async function route(req, res) {
     return row ? reply(res, 200, { ...row, sources: JSON.parse(row.sources) }) : reply(res, 404, { error: 'Report not found.' });
   }
   if (req.method === 'POST' && url.pathname === '/api/chat') {
+    assertSameOrigin(req);
     const body = await readBody(req); const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     if (req.headers.accept?.includes('text/event-stream')) {
@@ -473,6 +688,7 @@ async function route(req, res) {
     catch (e) { if (res.destroyed) return; return reply(res, e.status || (e.name === 'AbortError' ? 499 : 502), { error: e.message || 'The agent could not complete the response.' }); }
   }
   if (req.method === 'POST' && url.pathname === '/api/research') {
+    assertSameOrigin(req);
     const body = await readBody(req); const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     if (req.headers.accept?.includes('text/event-stream')) {
@@ -496,11 +712,12 @@ async function route(req, res) {
     catch (e) { if (res.destroyed) return; return reply(res, e.status || (e.name === 'AbortError' ? 499 : 502), { error: e.message || 'Research request failed.' }); }
   }
   if (req.method === 'POST' && url.pathname === '/api/library/ingest') {
+    assertSameOrigin(req);
     const body = await readBody(req, 1_100_000), filename = body.filename, text = body.text;
     if (typeof filename !== 'string' || !filename.toLowerCase().endsWith('.txt') || path.basename(filename) !== filename || filename.length > 140) return reply(res, 400, { error: 'Use a simple .txt filename.' });
     if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text, 'utf8') > 1_000_000) return reply(res, 400, { error: 'Text must contain 1 to 1,000,000 UTF-8 bytes.' });
     const target = path.join(libraryDir, filename);
-    try { await writeFile(target, text, { encoding: 'utf8', flag: 'wx' }); } catch (e) { return reply(res, e.code === 'EEXIST' ? 409 : 500, { error: e.code === 'EEXIST' ? 'That filename already exists.' : 'Could not save the text file.' }); }
+    try { await writeFile(target, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 }); } catch (e) { return reply(res, e.code === 'EEXIST' ? 409 : 500, { error: e.code === 'EEXIST' ? 'That filename already exists.' : 'Could not save the text file.' }); }
     const title = path.basename(filename, '.txt');
     const saved = database.prepare('INSERT INTO documents(title,filename,created) VALUES(?,?,?)').run(title, filename, Date.now());
     const insert = database.prepare('INSERT INTO chunks(document_id,body) VALUES(?,?)');
@@ -508,12 +725,13 @@ async function route(req, res) {
     return reply(res, 201, { ok: true, title, chunks: splitChunks(text).length });
   }
   if (req.method === 'POST' && url.pathname === '/api/speech') {
+    assertSameOrigin(req);
     let body; try { body = await readBody(req, 20_000); } catch (e) { return reply(res, e.status || 400, { error: e.message }); }
     if (!process.env.FISH_API_KEY) return reply(res, 503, { error: 'Fish Audio API key is not configured.' });
     if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 12_000) return reply(res, 400, { error: 'Text must be between 1 and 12,000 characters.' });
     try {
-      const r = await fetch('https://api.fish.audio/v1/tts', { method: 'POST', headers: { Authorization: `Bearer ${process.env.FISH_API_KEY}`, 'Content-Type': 'application/json', model: 's2.1-pro-free' }, body: JSON.stringify({ text: body.text, reference_id: process.env.FISH_VOICE_ID, prosody: { speed: 0.96, normalize_loudness: true }, format: 'mp3' }) });
-      if (!r.ok) return reply(res, 502, { error: `Fish Audio returned ${r.status}: ${(await r.text()).slice(0, 500)}` });
+      const r = await fetch('https://api.fish.audio/v1/tts', { method: 'POST', headers: { Authorization: `Bearer ${process.env.FISH_API_KEY}`, 'Content-Type': 'application/json', model: 's2.1-pro-free' }, redirect: 'error', body: JSON.stringify({ text: body.text, reference_id: process.env.FISH_VOICE_ID, prosody: { speed: 0.96, normalize_loudness: true }, format: 'mp3' }) });
+      if (!r.ok) { await r.body?.cancel().catch(() => {}); return reply(res, 502, { error: `Fish Audio returned HTTP ${r.status}. Check the server-side Fish Audio settings.` }); }
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       r.body.pipeTo(new WritableStream({ write(chunk) { res.write(Buffer.from(chunk)); }, close() { res.end(); }, abort() { res.destroy(); } })).catch(() => res.destroy()); return;
     } catch { return reply(res, 502, { error: 'Could not reach Fish Audio. Check network access and API key.' }); }
@@ -524,4 +742,8 @@ async function route(req, res) {
 const server = http.createServer((req, res) => {
   route(req, res).catch(e => { if (!res.headersSent && !res.destroyed) reply(res, e.status || 500, { error: e.message || 'Request failed.' }); });
 });
+server.requestTimeout = 30_000;
+server.headersTimeout = 10_000;
+server.keepAliveTimeout = 5_000;
+server.maxHeadersCount = 100;
 server.listen(port, host, () => console.log(`Meridian running at http://${host}:${port} using ${process.env.AI_PROVIDER || 'codex'} provider`));
