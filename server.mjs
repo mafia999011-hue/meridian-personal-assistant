@@ -44,6 +44,8 @@ database.exec(`
   CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL UNIQUE, created INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, body TEXT NOT NULL, FOREIGN KEY(document_id) REFERENCES documents(id));
   CREATE TABLE IF NOT EXISTS answer_cache(cache_key TEXT PRIMARY KEY, answer TEXT NOT NULL, model TEXT NOT NULL, sources TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS watches(id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('news','flight')), query TEXT NOT NULL, created INTEGER NOT NULL, next_check INTEGER NOT NULL, last_checked INTEGER, last_fingerprint TEXT, latest TEXT, last_error TEXT, UNIQUE(kind, query));
+  CREATE TABLE IF NOT EXISTS watch_events(id INTEGER PRIMARY KEY, watch_id INTEGER NOT NULL, summary TEXT NOT NULL, url TEXT, created INTEGER NOT NULL, FOREIGN KEY(watch_id) REFERENCES watches(id) ON DELETE CASCADE);
 `);
 if (process.platform !== 'win32') await chmod(databasePath, 0o600);
 
@@ -110,11 +112,13 @@ const expensiveRouteLimits = new Map([
   ['/api/chat', { requests: 12, concurrent: 2 }], ['/api/research', { requests: 8, concurrent: 2 }],
   ['/api/speech', { requests: 12, concurrent: 2 }], ['/api/library/ingest', { requests: 10, concurrent: 2 }],
   ['/api/flights', { requests: 12, concurrent: 1 }], ['/api/signals', { requests: 6, concurrent: 1 }],
+  ['/api/providers/check', { requests: 4, concurrent: 1 }], ['/api/watchlist/check', { requests: 5, concurrent: 1 }],
 ]);
 const expensiveRouteState = new Map();
 const expensiveRouteActive = new Map();
 function enforceRequestLimit(res, pathname) {
-  const policy = expensiveRouteLimits.get(pathname);
+  const watchCheck = /^\/api\/watchlist\/\d+\/check$/.test(pathname);
+  const policy = expensiveRouteLimits.get(watchCheck ? '/api/watchlist/check' : pathname);
   if (!policy) return;
   const now = Date.now(), windowMs = 60_000;
   let state = expensiveRouteState.get(pathname);
@@ -649,9 +653,91 @@ async function handleResearch(body, signal, onProgress = () => {}, onToken = nul
   const saved = database.prepare('INSERT INTO reports(question,result,sources,created) VALUES(?,?,?,?)').run(question, result.answer, JSON.stringify(safeSources), created);
   return { report_id: Number(saved.lastInsertRowid), question, report: result.answer, model: result.model, sources: safeSources, truncated: Boolean(result.truncated) };
 }
+async function checkProviderConnection(provider) {
+  const aviation = provider === 'aviationstack';
+  const name = aviation ? 'Aviationstack' : 'Mediastack';
+  const key = process.env[aviation ? 'AVIATIONSTACK_ACCESS_KEY' : 'MEDIASTACK_ACCESS_KEY'];
+  if (!key) return { provider, ok: false, message: `No ${name} key is configured.` };
+  const url = aviation ? 'https://api.aviationstack.com/v1/flights' : 'https://api.mediastack.com/v1/news';
+  const params = aviation
+    ? new URLSearchParams({ access_key: key, limit: '1', flight_status: 'active' })
+    : new URLSearchParams({ access_key: key, limit: '1', languages: 'en', keywords: 'geopolitics' });
+  try {
+    const response = await fetch(`${url}?${params}`, { redirect: 'error', signal: AbortSignal.timeout(12_000) });
+    const data = await readFetchJsonLimited(response).catch(() => ({}));
+    if (data.error || !response.ok) {
+      const rawCode = String(data.error?.code || '');
+      const code = /^[a-z0-9_]{1,64}$/i.test(rawCode) ? rawCode : '';
+      const message = /invalid.*(key|access)|access.*key/i.test(`${rawCode} ${data.error?.info || ''}`)
+        ? 'The provider rejected the configured key.'
+        : 'The provider rejected the request; check the key, plan, and quota.';
+      return { provider, ok: false, status: response.status, code, message };
+    }
+    return { provider, ok: true, status: response.status, message: 'Connection successful; the provider accepted the key.' };
+  } catch (error) {
+    return { provider, ok: false, message: error.name === 'TimeoutError' ? `${name} did not respond before the timeout.` : `Could not reach ${name}. Check the device network.` };
+  }
+}
+function watchSnapshot(kind, query, data) {
+  if (kind === 'news') {
+    return (Array.isArray(data.data) ? data.data : []).slice(0, 5).flatMap(article => {
+      let url;
+      try { const parsed = new URL(article.url); if (parsed.protocol !== 'https:') return []; url = parsed.href; }
+      catch { return []; }
+      return [{ summary: article.title || article.source || 'News update', url, published_at: article.published_at || null }];
+    });
+  }
+  return (Array.isArray(data.data) ? data.data : []).slice(0, 5).map(flight => {
+    const code = flight.flight?.iata || query;
+    const route = `${flight.departure?.iata || '—'} → ${flight.arrival?.iata || '—'}`;
+    return { summary: `${code}: ${flight.flight_status || 'status unavailable'} · ${route}`, url: null, status: flight.flight_status || null, departure: flight.departure?.scheduled || null, arrival: flight.arrival?.scheduled || null };
+  });
+}
+async function refreshWatch(watch) {
+  const checkedAt = Date.now();
+  try {
+    const aviation = watch.kind === 'flight';
+    const key = process.env[aviation ? 'AVIATIONSTACK_ACCESS_KEY' : 'MEDIASTACK_ACCESS_KEY'];
+    if (!key) throw new Error(`Missing ${aviation ? 'Aviationstack' : 'Mediastack'} API key.`);
+    const url = aviation ? 'https://api.aviationstack.com/v1/flights' : 'https://api.mediastack.com/v1/news';
+    const params = aviation
+      ? new URLSearchParams({ access_key: key, flight_iata: watch.query, limit: '5' })
+      : new URLSearchParams({ access_key: key, keywords: watch.query, languages: 'en', sort: 'published_desc', limit: '5' });
+    const response = await fetch(`${url}?${params}`, { redirect: 'error', signal: AbortSignal.timeout(12_000) });
+    const data = await readFetchJsonLimited(response).catch(() => ({}));
+    if (!response.ok || data.error) throw new Error(`${aviation ? 'Aviationstack' : 'Mediastack'} rejected the watch request; check the provider key, plan, and quota.`);
+    const latest = watchSnapshot(watch.kind, watch.query, data);
+    const fingerprint = createHash('sha256').update(JSON.stringify(latest)).digest('hex');
+    if (watch.last_fingerprint && watch.last_fingerprint !== fingerprint && latest.length) {
+      const item = latest[0];
+      database.prepare('INSERT INTO watch_events(watch_id,summary,url,created) VALUES(?,?,?,?)').run(watch.id, item.summary, item.url, checkedAt);
+      database.prepare('DELETE FROM watch_events WHERE created < ?').run(checkedAt - 30 * 24 * 60 * 60 * 1000);
+    }
+    database.prepare('UPDATE watches SET last_checked=?,next_check=?,last_fingerprint=?,latest=?,last_error=NULL WHERE id=?')
+      .run(checkedAt, checkedAt + 60 * 60 * 1000, fingerprint, JSON.stringify(latest), watch.id);
+  } catch (error) {
+    database.prepare('UPDATE watches SET last_checked=?,next_check=?,last_error=? WHERE id=?')
+      .run(checkedAt, checkedAt + 60 * 60 * 1000, error.message.slice(0, 240), watch.id);
+  }
+}
+let scheduledWatchChecksRunning = false;
+async function runScheduledWatchChecks() {
+  if (scheduledWatchChecksRunning) return;
+  scheduledWatchChecksRunning = true;
+  try {
+    const due = database.prepare('SELECT * FROM watches WHERE next_check <= ? ORDER BY next_check LIMIT 8').all(Date.now());
+    for (const watch of due) await refreshWatch(watch);
+  } finally { scheduledWatchChecksRunning = false; }
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${host}:${port}`);
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) { assertRequestBoundary(req); enforceRequestLimit(res, url.pathname); }
+  if (req.method === 'POST' && url.pathname === '/api/providers/check') {
+    const body = await readBody(req, 1024);
+    if (!['aviationstack', 'mediastack'].includes(body.provider)) return reply(res, 400, { error: 'Choose Aviationstack or Mediastack.' });
+    return reply(res, 200, await checkProviderConnection(body.provider));
+  }
   if (req.method === 'GET' && url.pathname === '/api/health') {
     const ollama = await ollamaStatus();
     return reply(res, 200, { ok: true, agent: 'Meridian', provider: process.env.AI_PROVIDER || 'codex', ollama, fishAudio: Boolean(process.env.FISH_API_KEY), aviationstack: Boolean(process.env.AVIATIONSTACK_ACCESS_KEY), mediastack: Boolean(process.env.MEDIASTACK_ACCESS_KEY), voice: process.env.FISH_VOICE_NAME || 'Fish Audio voice' });
@@ -733,6 +819,46 @@ async function route(req, res) {
   }
   if (req.method === 'GET' && url.pathname === '/api/library/search') {
     return reply(res, 200, { results: librarySearch(url.searchParams.get('q') || '') });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/watchlist') {
+    const watches = database.prepare('SELECT id,kind,query,created,next_check,last_checked,latest,last_error FROM watches ORDER BY created DESC').all().map(watch => ({ ...watch, latest: watch.latest ? JSON.parse(watch.latest) : [] }));
+    const alerts = database.prepare('SELECT e.id,e.watch_id,e.summary,e.url,e.created,w.kind,w.query FROM watch_events e JOIN watches w ON w.id=e.watch_id ORDER BY e.created DESC LIMIT 20').all();
+    return reply(res, 200, { watches, alerts, interval_minutes: 60 });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/watchlist') {
+    const body = await readBody(req, 2048);
+    const kind = body.kind;
+    let query = typeof body.query === 'string' ? body.query.trim() : '';
+    if (kind === 'flight') query = query.replace(/\s+/g, '').toUpperCase();
+    else if (kind === 'news') query = query.replace(/\s+/g, ' ');
+    else return reply(res, 400, { error: 'Choose a news topic or flight number.' });
+    if (kind === 'news' && (query.length < 3 || query.length > 100)) return reply(res, 400, { error: 'News topics must be 3 to 100 characters.' });
+    if (kind === 'flight' && !/^[A-Z0-9]{2,3}\d{1,4}[A-Z]?$/.test(query)) return reply(res, 400, { error: 'Enter a flight number such as AI101.' });
+    const count = database.prepare('SELECT COUNT(*) AS count FROM watches').get().count;
+    if (count >= 8) return reply(res, 400, { error: 'The watchlist is limited to 8 items to control provider usage.' });
+    const created = Date.now();
+    try {
+      const result = database.prepare('INSERT INTO watches(kind,query,created,next_check) VALUES(?,?,?,?)').run(kind, query, created, created + 60 * 60 * 1000);
+      return reply(res, 201, { id: Number(result.lastInsertRowid), kind, query, next_check: created + 60 * 60 * 1000 });
+    } catch (error) {
+      if (String(error.message).includes('UNIQUE')) return reply(res, 409, { error: 'That watch is already saved.' });
+      throw error;
+    }
+  }
+  const watchCheckMatch = url.pathname.match(/^\/api\/watchlist\/(\d+)\/check$/);
+  if (req.method === 'POST' && watchCheckMatch) {
+    const watch = database.prepare('SELECT * FROM watches WHERE id=?').get(Number(watchCheckMatch[1]));
+    if (!watch) return reply(res, 404, { error: 'Watch not found.' });
+    await refreshWatch(watch);
+    const updated = database.prepare('SELECT id,kind,query,last_checked,latest,last_error FROM watches WHERE id=?').get(watch.id);
+    return reply(res, 200, { ...updated, latest: updated.latest ? JSON.parse(updated.latest) : [] });
+  }
+  const watchDeleteMatch = url.pathname.match(/^\/api\/watchlist\/(\d+)$/);
+  if (req.method === 'DELETE' && watchDeleteMatch) {
+    const id = Number(watchDeleteMatch[1]);
+    database.prepare('DELETE FROM watch_events WHERE watch_id=?').run(id);
+    const result = database.prepare('DELETE FROM watches WHERE id=?').run(id);
+    return reply(res, result.changes ? 200 : 404, result.changes ? { ok: true } : { error: 'Watch not found.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/reports') {
     return reply(res, 200, { reports: database.prepare('SELECT id,question,created FROM reports ORDER BY id DESC LIMIT 50').all() });
@@ -826,6 +952,8 @@ async function route(req, res) {
   return reply(res, 404, { error: 'Not found' });
 }
 
+const watchScheduler = setInterval(() => { runScheduledWatchChecks().catch(() => {}); }, 60_000);
+watchScheduler.unref();
 const server = http.createServer((req, res) => {
   route(req, res).catch(e => { if (!res.headersSent && !res.destroyed) reply(res, e.status || 500, { error: e.message || 'Request failed.' }); });
 });

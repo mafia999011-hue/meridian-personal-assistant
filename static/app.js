@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const form = $('#form'), box = $('#message'), convo = $('#conversation'), status = $('#status'), send = $('#send'), interrupt = $('#interrupt');
 const mic = $('#mic'), sound = $('#sound'), debate = $('#debate'), researchMode = $('#researchMode');
-let history = [], speak = true, debating = false, activeChat = null, activeSpeech = null, currentAudio = null, requestSeq = 0, recognition = null;
+let history = [], speak = true, debating = false, activeChat = null, activeSpeech = null, currentAudio = null, requestSeq = 0, recognition = null, currentReport = null;
 function needsCurrentData(message, mode) {
   if (mode === 'Market Analysis') return true;
   if (mode === 'Historical Book Analysis') return false;
@@ -227,9 +227,48 @@ async function loadHealth() {
     $('#serviceBadge').textContent = `● LOCAL INTERFACE · ${String(data.provider).toUpperCase()}${ollama.available ? (ollama.models.length ? ` · OLLAMA ${ollama.selected_model}` : ' · OLLAMA HAS NO MODEL') : ''}`;
     $('#ollamaStatus').textContent = ollama.available ? (ollama.models.length ? `Local Ollama ready: ${ollama.models.join(', ')}` : 'Ollama API responds, but no model is installed.') : ollama.message;
     if (!data.mediastack) $('#signalsStatus').textContent = 'KEY NEEDED · MEDIASTACK_ACCESS_KEY';
-    $('#flightStatus').textContent = data.aviationstack ? 'KEY SET · VERIFIED WHEN FETCHED' : 'KEY NEEDED · AVIATIONSTACK_ACCESS_KEY';
+    $('#flightStatus').textContent = data.aviationstack ? 'KEY SET · CHECK CONNECTION IN SETTINGS' : 'KEY NEEDED · AVIATIONSTACK_ACCESS_KEY';
   } catch (error) { $('#serviceBadge').textContent = '● BACKEND STATUS UNAVAILABLE'; $('#ollamaStatus').textContent = error.message; }
 }
+async function checkProvider(provider) {
+  const button = document.querySelector(`[data-provider-check="${provider}"]`);
+  const output = provider === 'aviationstack' ? $('#aviationCheckStatus') : $('#mediaCheckStatus');
+  button.disabled = true; output.dataset.state = ''; output.textContent = 'Checking provider…';
+  try {
+    const result = await api('/api/providers/check', { method: 'POST', body: JSON.stringify({ provider }) });
+    output.dataset.state = result.ok ? 'success' : 'error';
+    output.textContent = result.ok ? result.message : `${result.message}${result.code ? ` (provider code: ${result.code})` : ''}`;
+  } catch (error) { output.dataset.state = 'error'; output.textContent = error.message; }
+  finally { button.disabled = false; }
+}
+document.querySelectorAll('[data-provider-check]').forEach(button => button.addEventListener('click', () => checkProvider(button.dataset.providerCheck)));
+async function loadWatchlist() {
+  try {
+    const data = await api('/api/watchlist'), list = $('#watchList'), alerts = $('#watchAlerts');
+    list.replaceChildren();
+    if (!data.watches.length) list.textContent = 'No saved watches.';
+    for (const watch of data.watches) {
+      const row = document.createElement('div'); row.className = 'watch-item';
+      const title = document.createElement('strong'); title.textContent = `${watch.kind === 'news' ? 'NEWS' : 'FLIGHT'} · ${watch.query}`; row.append(title);
+      const state = document.createElement('small'); state.textContent = watch.last_error ? `Last check failed: ${watch.last_error}` : watch.last_checked ? `Last checked ${new Date(watch.last_checked).toLocaleString()} · next check hourly` : `First automatic check ${new Date(watch.next_check).toLocaleString()}`; row.append(state);
+      if (watch.latest?.length) { const latest = document.createElement('small'); latest.textContent = `Latest: ${watch.latest[0].summary}`; row.append(latest); }
+      const actions = document.createElement('div'); actions.className = 'watch-actions';
+      const check = document.createElement('button'); check.className = 'btn'; check.type = 'button'; check.textContent = 'Check now'; check.setAttribute('aria-label', `Check ${watch.query} now`); check.addEventListener('click', async () => { check.disabled = true; $('#watchStatus').textContent = `Checking ${watch.query}…`; try { const result = await api(`/api/watchlist/${watch.id}/check`, { method: 'POST', body: '{}' }); $('#watchStatus').textContent = result.last_error || `Checked ${watch.query}.`; await loadWatchlist(); } catch (error) { $('#watchStatus').textContent = error.message; } finally { check.disabled = false; } });
+      const remove = document.createElement('button'); remove.className = 'btn'; remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${watch.query} from watchlist`); remove.addEventListener('click', async () => { try { await api(`/api/watchlist/${watch.id}`, { method: 'DELETE' }); await loadWatchlist(); } catch (error) { $('#watchStatus').textContent = error.message; } });
+      actions.append(check, remove); row.append(actions); list.append(row);
+    }
+    alerts.replaceChildren();
+    if (!data.alerts.length) alerts.textContent = 'No changes detected yet.';
+    for (const alert of data.alerts) { const row = document.createElement('div'); row.className = 'watch-alert'; const title = document.createElement('strong'); title.textContent = `${alert.kind === 'news' ? 'NEWS' : 'FLIGHT'} · ${alert.query}`; const summary = document.createElement('span'); summary.textContent = alert.summary; const time = document.createElement('small'); time.textContent = new Date(alert.created).toLocaleString(); row.append(title, summary, time); if (alert.url) { const link = document.createElement('a'); link.href = alert.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Open source'; row.append(link); } alerts.append(row); }
+  } catch (error) { $('#watchList').textContent = error.message; }
+}
+$('#watchKind').addEventListener('change', () => { $('#watchQuery').placeholder = $('#watchKind').value === 'flight' ? 'Flight number, e.g. AI101' : 'e.g. Red Sea shipping'; });
+$('#watchForm').addEventListener('submit', async event => {
+  event.preventDefault(); const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true; $('#watchStatus').textContent = 'Saving watch…';
+  try { const result = await api('/api/watchlist', { method: 'POST', body: JSON.stringify({ kind: $('#watchKind').value, query: $('#watchQuery').value }) }); $('#watchQuery').value = ''; $('#watchStatus').textContent = `Saved. First automatic check is scheduled for ${new Date(result.next_check).toLocaleTimeString()}.`; await loadWatchlist(); }
+  catch (error) { $('#watchStatus').textContent = error.message; }
+  finally { button.disabled = false; }
+});
 async function loadLibrary() {
   try { const data = await api('/api/library'); $('#libraryList').replaceChildren(); for (const doc of data.documents) { const item = document.createElement('div'); item.className = 'tool-item'; item.textContent = `${doc.title} · ${new Date(doc.created).toLocaleDateString()}`; $('#libraryList').append(item); } if (!data.documents.length) $('#libraryList').textContent = 'No personal texts imported yet.'; }
   catch (error) { $('#libraryList').textContent = error.message; }
@@ -239,9 +278,18 @@ async function loadReports() {
   catch (error) { $('#reportList').textContent = error.message; }
 }
 async function openReport(id) {
-  try { const data = await api(`/api/reports/${id}`); $('#reportTitle').textContent = data.question; $('#reportText').textContent = data.result; const links = $('#reportSources'); links.replaceChildren(); for (const source of data.sources) { const a = document.createElement('a'); a.href = source.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = source.title; links.append(a, document.createElement('br')); } $('#reportDialog').showModal(); }
+  try { const data = await api(`/api/reports/${id}`); currentReport = data; $('#reportTitle').textContent = data.question; $('#reportText').textContent = data.result; const links = $('#reportSources'); links.replaceChildren(); for (const source of data.sources) { const a = document.createElement('a'); a.href = source.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = source.title; links.append(a, document.createElement('br')); } $('#reportDialog').showModal(); }
   catch (error) { status.textContent = error.message; }
 }
+$('#exportReport').addEventListener('click', () => {
+  if (!currentReport) return;
+  const sources = (currentReport.sources || []).map((source, index) => `${index + 1}. [${String(source.title || 'Source').replace(/[\[\]]/g, '')}](${source.url})`).join('\n');
+  const markdown = `# ${currentReport.question}\n\n_Exported ${new Date().toLocaleString()}_\n\n${currentReport.report || currentReport.result}\n\n## Sources\n\n${sources || 'No sources were attached to this report.'}\n`;
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+  const slug = String(currentReport.question || 'report').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'report';
+  anchor.href = url; anchor.download = `meridian-${slug}.md`; document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 form.addEventListener('submit', event => { event.preventDefault(); ask(box.value); });
 box.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } });
 interrupt.addEventListener('click', interruptAll); document.addEventListener('keydown', event => { if (event.key === 'Escape' && $('#reportDialog').open) $('#reportDialog').close(); else if (event.key === 'Escape') interruptAll(); });
@@ -283,7 +331,7 @@ function initDepthMotion() {
   });
 }
 initDepthMotion();
-loadHealth(); loadHistory(); loadLibrary(); loadReports(); loadSignals();
+loadHealth(); loadHistory(); loadLibrary(); loadReports(); loadSignals(); loadWatchlist(); window.setInterval(loadWatchlist, 5 * 60 * 1000);
 $('#flightForm')?.addEventListener('submit', loadFlights);
 $('#flightScope')?.addEventListener('change', () => { $('#flightQuery').placeholder = $('#flightScope').value === 'flight' ? 'Flight number, e.g. AI101' : $('#flightScope').value === 'active' ? 'Optional' : 'Airport IATA code, e.g. DEL'; });
 $('#refreshSignals')?.addEventListener('click', loadSignals);

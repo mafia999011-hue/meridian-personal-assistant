@@ -92,6 +92,16 @@ Open [http://127.0.0.1:4173](http://127.0.0.1:4173). The server listens on this 
 
 The app stores conversations, reports, and library metadata in `data/meridian.sqlite3`; imported TXT files are stored in `data/library/`. Those local files are excluded from Git.
 
+### Share MERIDIAN safely with a Cloudflare Quick Tunnel
+
+Quick Tunnel URLs are temporary. Anyone who has the URL can reach an unprotected tunnel. To require a Cloudflare email one-time PIN, keep MERIDIAN running, then open a second terminal and run:
+
+```sh
+./scripts/start-cloudflare-quick-tunnel.sh your-email@example.com
+```
+
+Replace the example with the email Cloudflare should allow. The script starts `cloudflared` with `--allowed-mail`; stop any existing Quick Tunnel first, because the old URL remains open until that process is stopped. The protected tunnel prints a new URL. If you set a custom `PORT`, pass it to the script as well, for example `PORT=4174 ./scripts/start-cloudflare-quick-tunnel.sh your-email@example.com`.
+
 ## News and aviation tracking
 
 Set `MEDIASTACK_ACCESS_KEY` in `.env` to load sourced geopolitical headlines on demand. Results are cached locally for 10 minutes; the dashboard does not poll automatically. Mediastack plan limits affect request volume and freshness.
