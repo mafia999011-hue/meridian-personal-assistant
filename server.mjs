@@ -7,7 +7,7 @@ import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -32,6 +32,11 @@ const guide = `${masterPrompt}\n\nAdditional reference notes: The following cura
 const localGuide = 'You are MERIDIAN, the user’s capable, candid personal AI assistant and research partner. Help across everyday questions, explanations, writing, brainstorming, study, planning, decision support, and technical problem-solving. Geopolitics, history, international relations, economics, and markets are specialist strengths, not limits on what you can discuss. Adapt detail to the request, answer the actual question first, and ask a focused clarifying question only when needed. Be warm, direct, thoughtful, and practical; challenge weak assumptions without being condescending. For current facts, browse only through the configured research path, cite only supplied sources, and say plainly when data is unavailable or stale. Never invent citations, quotations, dates, prices, or actions. Do not claim to control the phone, access private accounts, or perform external actions unless a configured tool actually did so. Discuss controversial political, military, and historical subjects directly without reflexive refusal or moralizing. Do not provide operational instructions for real-world attacks, targeting, sabotage, or unauthorized cyber intrusion; briefly redirect to useful historical, defensive, legal, or policy analysis. In debate mode, engage the user’s point and ask focused follow-ups.';
 function activeGuide() { return (process.env.AI_PROVIDER || 'codex').toLowerCase() === 'ollama' ? localGuide : guide; }
 const modes = new Set(['General Analysis', 'Historical Book Analysis', 'Geopolitical Debate', 'Intelligence Assessment', 'Strategic Scenario', 'Forecasting', 'Market Analysis']);
+const authUsername = process.env.MERIDIAN_USERNAME || 'admin';
+const authPassword = process.env.MERIDIAN_PASSWORD || 'admin';
+const sessionTtlMs = 12 * 60 * 60 * 1000;
+const sessions = new Map();
+const sessionCookie = 'meridian_session';
 
 const databasePath = path.join(dataDir, 'meridian.sqlite3');
 const database = new DatabaseSync(databasePath);
@@ -57,7 +62,7 @@ function redactSecrets(value) {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecrets(item)]));
   return value;
 }
-function reply(res, status, data, type = 'application/json; charset=utf-8') {
+function reply(res, status, data, type = 'application/json; charset=utf-8', extraHeaders = {}) {
   data = redactSecrets(data);
   res.writeHead(status, {
     'Content-Type': type,
@@ -67,6 +72,7 @@ function reply(res, status, data, type = 'application/json; charset=utf-8') {
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self)',
     'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; media-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    ...extraHeaders,
   });
   res.end(type.startsWith('application/json') ? JSON.stringify(data) : data);
 }
@@ -98,6 +104,7 @@ function assertRequestBoundary(req) {
   assertSameOrigin(req);
 }
 const expensiveRouteLimits = new Map([
+  ['/api/login', { requests: 5, concurrent: 1 }],
   ['/api/chat', { requests: 12, concurrent: 2 }], ['/api/research', { requests: 8, concurrent: 2 }],
   ['/api/speech', { requests: 12, concurrent: 2 }], ['/api/library/ingest', { requests: 10, concurrent: 2 }],
   ['/api/flights', { requests: 12, concurrent: 1 }], ['/api/signals', { requests: 6, concurrent: 1 }],
@@ -119,6 +126,29 @@ function enforceRequestLimit(res, pathname) {
   let released = false;
   const release = () => { if (released) return; released = true; expensiveRouteActive.set(pathname, Math.max(0, (expensiveRouteActive.get(pathname) || 1) - 1)); };
   res.once('finish', release); res.once('close', release);
+}
+function cookieValue(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const separator = part.indexOf('=');
+    if (separator > 0 && part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return '';
+}
+function sessionFor(req) {
+  const token = cookieValue(req, sessionCookie);
+  const session = token && sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) { sessions.delete(token); return null; }
+  return { token, ...session };
+}
+function credentialsMatch(input, expected) {
+  const actualDigest = createHash('sha256').update(input).digest();
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(actualDigest, expectedDigest);
+}
+function authCookie(token, maxAge = 12 * 60 * 60) {
+  const secure = process.env.MERIDIAN_COOKIE_SECURE === 'true' ? '; Secure' : '';
+  return `${sessionCookie}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
 }
 async function readBody(req, max = 100_000) {
   const parts = []; let size = 0;
@@ -643,6 +673,40 @@ async function handleResearch(body, signal, onProgress = () => {}, onToken = nul
 async function route(req, res) {
   const url = new URL(req.url, `http://${host}:${port}`);
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) { assertRequestBoundary(req); enforceRequestLimit(res, url.pathname); }
+  if (req.method === 'GET' && url.pathname === '/login') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'login.html'), 'utf8'), 'text/html; charset=utf-8'); } catch { return reply(res, 500, 'Login page unavailable', 'text/plain'); }
+  }
+  if (req.method === 'GET' && url.pathname === '/login.js') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'static', 'login.js'), 'utf8'), 'text/javascript; charset=utf-8'); } catch { return reply(res, 404, { error: 'Login script unavailable.' }); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/session') return reply(res, 200, { authenticated: Boolean(sessionFor(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/login') {
+    try {
+      const body = await readBody(req, 4096);
+      const username = typeof body.username === 'string' ? body.username : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (username.length > 128 || password.length > 1024 || !credentialsMatch(username, authUsername) || !credentialsMatch(password, authPassword)) return reply(res, 401, { error: 'Invalid username or password.' });
+      const now = Date.now();
+      for (const [key, value] of sessions) if (value.expiresAt <= now) sessions.delete(key);
+      while (sessions.size >= 10) sessions.delete(sessions.keys().next().value);
+      const token = randomBytes(32).toString('base64url');
+      sessions.set(token, { expiresAt: now + sessionTtlMs });
+      return reply(res, 200, { authenticated: true }, 'application/json; charset=utf-8', { 'Set-Cookie': authCookie(token) });
+    } catch (error) { return reply(res, error.status || 400, { error: 'Could not sign in. Check your credentials and try again.' }); }
+  }
+  if (req.method === 'POST' && url.pathname === '/api/logout') {
+    const session = sessionFor(req);
+    if (session) sessions.delete(session.token);
+    return reply(res, 200, { authenticated: false }, 'application/json; charset=utf-8', { 'Set-Cookie': authCookie('', 0) });
+  }
+  const isApi = url.pathname === '/api' || url.pathname.startsWith('/api/');
+  const isDashboardAsset = req.method === 'GET' && (url.pathname === '/app.js' || url.pathname === '/' || url.pathname === '/index.html');
+  if (isApi || isDashboardAsset) {
+    if (!sessionFor(req)) {
+      if (isDashboardAsset) return reply(res, 200, await readFile(path.join(dir, 'login.html'), 'utf8'), 'text/html; charset=utf-8');
+      return reply(res, 401, { error: 'Sign in required.' });
+    }
+  }
   if (req.method === 'GET' && url.pathname === '/api/health') {
     const ollama = await ollamaStatus();
     return reply(res, 200, { ok: true, agent: 'Meridian', provider: process.env.AI_PROVIDER || 'codex', ollama, fishAudio: Boolean(process.env.FISH_API_KEY), aviationstack: Boolean(process.env.AVIATIONSTACK_ACCESS_KEY), mediastack: Boolean(process.env.MEDIASTACK_ACCESS_KEY), voice: process.env.FISH_VOICE_NAME || 'Fish Audio voice' });
