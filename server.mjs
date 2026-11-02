@@ -118,19 +118,20 @@ const expensiveRouteState = new Map();
 const expensiveRouteActive = new Map();
 function enforceRequestLimit(res, pathname) {
   const watchCheck = /^\/api\/watchlist\/\d+\/check$/.test(pathname);
-  const policy = expensiveRouteLimits.get(watchCheck ? '/api/watchlist/check' : pathname);
+  const key = watchCheck ? '/api/watchlist/check' : pathname;
+  const policy = expensiveRouteLimits.get(key);
   if (!policy) return;
   const now = Date.now(), windowMs = 60_000;
-  let state = expensiveRouteState.get(pathname);
+  let state = expensiveRouteState.get(key);
   if (!state || now - state.startedAt >= windowMs) state = { startedAt: now, count: 0 };
-  const active = expensiveRouteActive.get(pathname) || 0;
+  const active = expensiveRouteActive.get(key) || 0;
   if (state.count >= policy.requests || active >= policy.concurrent) {
-    expensiveRouteState.set(pathname, state);
+    expensiveRouteState.set(key, state);
     throw Object.assign(new Error('Request limit reached. Wait briefly and try again.'), { status: 429 });
   }
-  state.count += 1; expensiveRouteState.set(pathname, state); expensiveRouteActive.set(pathname, active + 1);
+  state.count += 1; expensiveRouteState.set(key, state); expensiveRouteActive.set(key, active + 1);
   let released = false;
-  const release = () => { if (released) return; released = true; expensiveRouteActive.set(pathname, Math.max(0, (expensiveRouteActive.get(pathname) || 1) - 1)); };
+  const release = () => { if (released) return; released = true; expensiveRouteActive.set(key, Math.max(0, (expensiveRouteActive.get(key) || 1) - 1)); };
   res.once('finish', release); res.once('close', release);
 }
 async function readBody(req, max = 100_000) {
@@ -721,10 +722,14 @@ async function refreshWatch(watch) {
   }
 }
 let scheduledWatchChecksRunning = false;
+function pruneWatchEvents() {
+  database.prepare('DELETE FROM watch_events WHERE created < ?').run(Date.now() - 30 * 24 * 60 * 60 * 1000);
+}
 async function runScheduledWatchChecks() {
   if (scheduledWatchChecksRunning) return;
   scheduledWatchChecksRunning = true;
   try {
+    pruneWatchEvents();
     const due = database.prepare('SELECT * FROM watches WHERE next_check <= ? ORDER BY next_check LIMIT 8').all(Date.now());
     for (const watch of due) await refreshWatch(watch);
   } finally { scheduledWatchChecksRunning = false; }
@@ -821,6 +826,7 @@ async function route(req, res) {
     return reply(res, 200, { results: librarySearch(url.searchParams.get('q') || '') });
   }
   if (req.method === 'GET' && url.pathname === '/api/watchlist') {
+    pruneWatchEvents();
     const watches = database.prepare('SELECT id,kind,query,created,next_check,last_checked,latest,last_error FROM watches ORDER BY created DESC').all().map(watch => ({ ...watch, latest: watch.latest ? JSON.parse(watch.latest) : [] }));
     const alerts = database.prepare('SELECT e.id,e.watch_id,e.summary,e.url,e.created,w.kind,w.query FROM watch_events e JOIN watches w ON w.id=e.watch_id ORDER BY e.created DESC LIMIT 20').all();
     return reply(res, 200, { watches, alerts, interval_minutes: 60 });

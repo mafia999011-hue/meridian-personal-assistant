@@ -4,7 +4,7 @@ The existing Node MERIDIAN app now includes local Ollama support, public web res
 
 ## Install on Linux, macOS, or Windows
 
-MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported runtime because the app uses Node's built-in SQLite module. The project has no npm dependencies to install.
+MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported runtime because the app uses Node's built-in SQLite module. The project has no npm dependencies to install. Run `npm test` to execute the built-in Node integration checks.
 
 ### 1. Install Node.js and Git
 
