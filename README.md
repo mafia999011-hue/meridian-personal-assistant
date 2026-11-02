@@ -76,7 +76,7 @@ notepad .env
 cp .env.example .env
 ```
 
-Open `.env` in your preferred text editor and set `AI_PROVIDER=ollama`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys. By default, browser changes are accepted only from the local dashboard origin. If you intentionally access MERIDIAN through a trusted reverse proxy, list its exact origin(s), comma-separated, in `MERIDIAN_ALLOWED_ORIGINS` (for example, `https://meridian.example.com`). Restrict the proxy with its own authentication; do not expose the unauthenticated workspace publicly.
+Open `.env` in your preferred text editor and set `AI_PROVIDER=ollama`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys. The API rejects unrecognized hosts and cross-site browser requests and applies per-route request and concurrency limits. MERIDIAN has no user login and is intended for one local user. If you access it through a trusted reverse proxy, list its exact origin(s), comma-separated, in `MERIDIAN_ALLOWED_ORIGINS` (for example, `https://meridian.example.com`) and enforce authentication and TLS at the proxy. Never expose the app port directly or publish the unauthenticated workspace.
 
 You can use `AI_PROVIDER=codex` instead if the Codex CLI is installed and signed in on your machine.
 
