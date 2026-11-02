@@ -1,6 +1,6 @@
 # MERIDIAN — Personal AI Assistant
 
-The existing Node MERIDIAN app now includes local Ollama support, public web research with source links, local TXT retrieval, saved conversations/reports, Mediastack geopolitical headlines, Aviationstack flight tracking, and specialist analysis modes while retaining its Codex CLI chat, debate, interruption, browser speech input, and Fish Audio voice output.
+The existing Node MERIDIAN app now includes local Ollama support, public web research with source links, local TXT retrieval, saved conversations/reports, Mediastack geopolitical headlines, Aviationstack flight tracking, provider connection checks, hourly news and flight watchlists, Markdown report export, and specialist analysis modes while retaining its Codex CLI chat, debate, interruption, browser speech input, and Fish Audio voice output.
 
 ## Install on Linux, macOS, or Windows
 
@@ -104,11 +104,14 @@ Replace the example with the email Cloudflare should allow. The script starts `c
 
 ## News and aviation tracking
 
-Set `MEDIASTACK_ACCESS_KEY` in `.env` to load sourced geopolitical headlines on demand. Results are cached locally for 10 minutes; the dashboard does not poll automatically. Mediastack plan limits affect request volume and freshness.
+Set `MEDIASTACK_ACCESS_KEY` in `.env` to load sourced geopolitical headlines on demand. Results are cached locally for 10 minutes; the dashboard does not poll automatically. In **Library & reports → Provider connections**, use the check buttons to make a live request and confirm that Aviationstack or Mediastack accepts its configured key. Each check consumes one provider request. Mediastack plan limits affect request volume and freshness.
+
+The watchlist supports up to eight news-topic or flight-number monitors. Checks run hourly while MERIDIAN is running; each saved watch uses one provider request per check. Use **Check now** for an immediate refresh. Changed results appear in Recent alerts and are retained for up to 30 days.
 
 ## Aviation tracking
 
 Set a valid Aviationstack-specific `AVIATIONSTACK_ACCESS_KEY` in `.env` to enable the Live Aviation Tracker. Aviationstack and Mediastack issue separate keys; do not reuse one provider's key for the other. Restart MERIDIAN after editing `.env`. It can query active flights, a flight number, departures from an airport, or arrivals to an airport. Flight data is requested on demand to avoid unnecessary API usage; provider timestamps, positions, and filtering depend on your Aviationstack plan. The key remains server-side.
+Saved reports can be exported from the report viewer as Markdown with their source links.
 
 ## Research and library
 
