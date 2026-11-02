@@ -355,10 +355,3 @@ $('#clearChat')?.addEventListener('click', async () => {
   } catch (error) { status.textContent = `Could not clear saved conversation: ${error.message}`; }
   finally { button.disabled = false; }
 });
-
-$('#signOut')?.addEventListener('click', async () => {
-  const button = $('#signOut');
-  button.disabled = true;
-  try { await api('/api/logout', { method: 'POST', body: '{}' }); }
-  finally { window.location.assign('/login'); }
-});
