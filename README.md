@@ -9,8 +9,20 @@ MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported 
 ### 1. Install Node.js and Git
 
 - **Windows:** Install the current LTS release from the [official Node.js downloads page](https://nodejs.org/en/download). Install [Git for Windows](https://git-scm.com/download/win) if Git is not already available.
-- **macOS:** Install Git with Xcode Command Line Tools (`xcode-select --install`) or Homebrew, then install Node 24 or newer. With [nvm](https://github.com/nvm-sh/nvm), run `nvm install 24`.
-- **Linux:** Install Git with your distribution's package manager. Install Node 24 or newer from the [official Node.js downloads page](https://nodejs.org/en/download), or use [nvm](https://github.com/nvm-sh/nvm) and run `nvm install 24`.
+- **macOS:** Install Git with Xcode Command Line Tools (`xcode-select --install`) or Homebrew. Install Node 24 or newer from the [official Node.js downloads page](https://nodejs.org/en/download), or install [nvm](https://github.com/nvm-sh/nvm) using the commands below.
+- **Linux:** Install Git with your distribution's package manager. Install Node 24 or newer from the [official Node.js downloads page](https://nodejs.org/en/download), or install [nvm](https://github.com/nvm-sh/nvm) using the commands below.
+
+To install Node 24 with nvm on Linux or macOS, run its installer:
+
+```sh
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+```
+
+Open a new terminal so nvm is loaded, then install Node 24:
+
+```sh
+nvm install 24
+```
 
 Check the installed runtime:
 
@@ -31,13 +43,25 @@ cd meridian-personal-assistant
 
 ### 3. Configure an AI provider
 
-For local AI, install [Ollama](https://ollama.com/download) for your operating system, then download the model:
+For local AI, install [Ollama](https://ollama.com/download) for your operating system. The official install commands are:
+
+**Windows PowerShell:**
+
+```powershell
+irm https://ollama.com/install.ps1 | iex
+```
+
+**macOS or Linux Terminal:**
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+On Windows, Ollama runs in the background after installation. On macOS, open the Ollama app. On Linux, start the Ollama service if the installer did not start it. Then download the model used by this setup:
 
 ```sh
 ollama pull qwen3:1.7b
 ```
-
-On Windows, Ollama runs in the background after installation. On macOS, open the Ollama app. On Linux, start the Ollama service if your installer did not start it.
 
 Create your local settings file. **PowerShell:**
 
@@ -50,10 +74,9 @@ notepad .env
 
 ```sh
 cp .env.example .env
-${EDITOR:-nano} .env
 ```
 
-Set `AI_PROVIDER=ollama` in `.env`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys.
+Open `.env` in your preferred text editor and set `AI_PROVIDER=ollama`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys.
 
 You can use `AI_PROVIDER=codex` instead if the Codex CLI is installed and signed in on your machine.
 
