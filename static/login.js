@@ -12,13 +12,12 @@ form.addEventListener('submit', async event => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        email: form.elements.email.value,
         username: form.elements.username.value,
         password: form.elements.password.value,
       }),
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || 'Sign-in failed. Check your details and try again.');
+    if (!response.ok) throw new Error(result.error || 'Sign-in failed. Check your username and password.');
     window.location.assign('/');
   } catch (error) {
     errorMessage.textContent = error.message || 'Unable to sign in. Try again.';
