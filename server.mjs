@@ -152,6 +152,21 @@ function authCookie(token, maxAge = 12 * 60 * 60) {
   const secure = process.env.MERIDIAN_COOKIE_SECURE === 'true' ? '; Secure' : '';
   return `${sessionCookie}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
 }
+async function verifyMailboxlayerEmail(email) {
+  const accessKey = process.env.EMAIL_VERIFICATION_API_KEY;
+  if (!accessKey) return { available: false, valid: false };
+  const endpoint = new URL('https://apilayer.net/api/check');
+  endpoint.searchParams.set('access_key', accessKey);
+  endpoint.searchParams.set('email', email);
+  try {
+    const response = await fetch(endpoint, { redirect: 'error', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8_000) });
+    const result = await readFetchJsonLimited(response, 128_000);
+    if (!response.ok || result.success === false || result.error || typeof result.format_valid !== 'boolean') return { available: false, valid: false };
+    return { available: true, valid: result.format_valid && result.mx_found !== false && result.smtp_check !== false };
+  } catch {
+    return { available: false, valid: false };
+  }
+}
 async function readBody(req, max = 100_000) {
   const parts = []; let size = 0;
   for await (const part of req) { size += part.length; if (size > max) throw Object.assign(new Error(`Request exceeds ${max} bytes.`), { status: 413 }); parts.push(part); }
@@ -690,6 +705,9 @@ async function route(req, res) {
       const password = typeof body.password === 'string' ? body.password : '';
       if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return reply(res, 400, { error: 'Enter a valid email address.' });
       if (username.length > 128 || password.length > 1024 || !credentialsMatch(username, authUsername) || !credentialsMatch(password, authPassword)) return reply(res, 401, { error: 'Invalid username or password.' });
+      const emailCheck = await verifyMailboxlayerEmail(email);
+      if (!emailCheck.available) return reply(res, 503, { error: 'Email verification is unavailable right now. Sign-in was not completed.' });
+      if (!emailCheck.valid) return reply(res, 422, { error: 'Mailboxlayer could not verify this email address.' });
       const now = Date.now();
       for (const [key, value] of sessions) if (value.expiresAt <= now) sessions.delete(key);
       while (sessions.size >= 10) sessions.delete(sessions.keys().next().value);

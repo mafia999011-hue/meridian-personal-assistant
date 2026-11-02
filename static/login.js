@@ -17,7 +17,8 @@ form.addEventListener('submit', async event => {
         password: form.elements.password.value,
       }),
     });
-    if (!response.ok) throw new Error('Sign-in failed. Check your username and password.');
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || 'Sign-in failed. Check your details and try again.');
     window.location.assign('/');
   } catch (error) {
     errorMessage.textContent = error.message || 'Unable to sign in. Try again.';
