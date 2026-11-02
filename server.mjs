@@ -805,6 +805,12 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/models') {
     const status = await ollamaStatus(); return reply(res, 200, status);
   }
+  if (req.method === 'GET' && url.pathname === '/aviation') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'aviation.html'), 'utf8'), 'text/html; charset=utf-8'); } catch { return reply(res, 500, 'Aviation page unavailable', 'text/plain'); }
+  }
+  if (req.method === 'GET' && url.pathname === '/aviation.js') {
+    try { return reply(res, 200, await readFile(path.join(dir, 'static', 'aviation.js'), 'utf8'), 'text/javascript; charset=utf-8'); } catch { return reply(res, 404, { error: 'Aviation script unavailable.' }); }
+  }
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
     try { return reply(res, 200, await readFile(path.join(dir, 'index.html'), 'utf8'), 'text/html; charset=utf-8'); } catch { return reply(res, 500, 'UI unavailable', 'text/plain'); }
   }
