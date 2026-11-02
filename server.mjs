@@ -85,6 +85,10 @@ function configuredOrigins() {
   });
 }
 function localHosts() { return new Set([`127.0.0.1:${port}`, `localhost:${port}`]); }
+function isCloudflareQuickTunnelHost(hostname) {
+  const normalized = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  return normalized.endsWith('.trycloudflare.com');
+}
 function assertSameOrigin(req) {
   const fetchSite = req.headers['sec-fetch-site'];
   if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) throw Object.assign(new Error('Cross-site requests are not allowed.'), { status: 403 });
@@ -96,13 +100,15 @@ function assertSameOrigin(req) {
   const local = localHosts();
   const isLocalOrigin = parsed.protocol === 'http:' && local.has(parsed.host.toLowerCase()) && local.has(requestHost);
   const isConfiguredOrigin = configuredOrigins().some(allowed => allowed.origin === parsed.origin && (requestHost === allowed.host.toLowerCase() || local.has(requestHost)));
-  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
+  const isQuickTunnelOrigin = parsed.protocol === 'https:' && isCloudflareQuickTunnelHost(parsed.hostname) && requestHost === parsed.host.toLowerCase();
+  if (parsed.username || parsed.password || (!isLocalOrigin && !isConfiguredOrigin && !isQuickTunnelOrigin)) throw Object.assign(new Error('Cross-origin requests are not allowed.'), { status: 403 });
 }
 function assertRequestBoundary(req) {
   const requestHost = String(req.headers.host || '').toLowerCase();
   const allowedHosts = localHosts();
   for (const origin of configuredOrigins()) allowedHosts.add(origin.host.toLowerCase());
-  if (!allowedHosts.has(requestHost)) throw Object.assign(new Error('Unrecognized request host.'), { status: 403 });
+  const parsedHost = requestHost.startsWith('[') ? '' : requestHost.split(':')[0];
+  if (!allowedHosts.has(requestHost) && !isCloudflareQuickTunnelHost(parsedHost)) throw Object.assign(new Error('Unrecognized request host.'), { status: 403 });
   assertSameOrigin(req);
 }
 const expensiveRouteLimits = new Map([
