@@ -22,6 +22,7 @@ function activeGuide() { return (process.env.AI_PROVIDER || 'codex').toLowerCase
 const modes = new Set(['General Analysis', 'Historical Book Analysis', 'Geopolitical Debate', 'Intelligence Assessment', 'Strategic Scenario', 'Forecasting', 'Market Analysis']);
 
 const database = new DatabaseSync(path.join(dataDir, 'meridian.sqlite3'));
+let mediaStackCache = { expiresAt: 0, payload: null };
 database.exec(`
   CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, mode TEXT NOT NULL, created INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, question TEXT NOT NULL, result TEXT NOT NULL, sources TEXT NOT NULL, created INTEGER NOT NULL);
@@ -361,7 +362,56 @@ async function route(req, res) {
   const url = new URL(req.url, `http://${host}:${port}`);
   if (req.method === 'GET' && url.pathname === '/api/health') {
     const ollama = await ollamaStatus();
-    return reply(res, 200, { ok: true, agent: 'Meridian', provider: process.env.AI_PROVIDER || 'codex', ollama, fishAudio: Boolean(process.env.FISH_API_KEY), voice: process.env.FISH_VOICE_NAME || 'Fish Audio voice' });
+    return reply(res, 200, { ok: true, agent: 'Meridian', provider: process.env.AI_PROVIDER || 'codex', ollama, fishAudio: Boolean(process.env.FISH_API_KEY), aviationstack: Boolean(process.env.AVIATIONSTACK_ACCESS_KEY), mediastack: Boolean(process.env.MEDIASTACK_ACCESS_KEY), voice: process.env.FISH_VOICE_NAME || 'Fish Audio voice' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/flights') {
+    const accessKey = process.env.AVIATIONSTACK_ACCESS_KEY;
+    if (!accessKey) return reply(res, 503, { error: 'Aviationstack is not configured. Add AVIATIONSTACK_ACCESS_KEY to .env.' });
+    const type = url.searchParams.get('type') || 'active';
+    const code = (url.searchParams.get('q') || '').replace(/\s+/g, '').toUpperCase();
+    if (!['active', 'flight', 'departures', 'arrivals'].includes(type)) return reply(res, 400, { error: 'Choose active flights, flight number, departures, or arrivals.' });
+    const params = new URLSearchParams({ access_key: accessKey, limit: '10' });
+    if (type === 'active') params.set('flight_status', 'active');
+    if (type === 'flight') {
+      if (!/^[A-Z0-9]{2,3}\d{1,4}[A-Z]?$/.test(code)) return reply(res, 400, { error: 'Enter a flight number such as AI101.' });
+      params.set('flight_iata', code);
+    }
+    if (type === 'departures' || type === 'arrivals') {
+      if (!/^[A-Z]{3}$/.test(code)) return reply(res, 400, { error: 'Enter a three-letter airport IATA code, such as DEL.' });
+      params.set(type === 'departures' ? 'dep_iata' : 'arr_iata', code);
+      if (type === 'departures') params.set('flight_status', 'active');
+    }
+    try {
+      const response = await fetch(`https://api.aviationstack.com/v1/flights?${params}`, { signal: AbortSignal.timeout(12_000) });
+      const data = await response.json().catch(() => ({}));
+      if (data.error) return reply(res, 502, { error: `Aviationstack: ${data.error.info || data.error.message || data.error.code || 'request failed'}` });
+      if (!response.ok) return reply(res, 502, { error: `Aviationstack returned HTTP ${response.status}.` });
+      return reply(res, 200, { retrieved_at: new Date().toISOString(), total: data.pagination?.total ?? data.data?.length ?? 0, flights: (data.data || []).slice(0, 10) });
+    } catch (error) {
+      return reply(res, 502, { error: error.name === 'TimeoutError' ? 'Aviationstack request timed out. Try again.' : 'Could not reach Aviationstack. Check the server network connection.' });
+    }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/signals') {
+    const accessKey = process.env.MEDIASTACK_ACCESS_KEY;
+    if (!accessKey) return reply(res, 503, { error: 'Mediastack is not configured. Add MEDIASTACK_ACCESS_KEY to .env.' });
+    if (mediaStackCache.payload && mediaStackCache.expiresAt > Date.now()) return reply(res, 200, mediaStackCache.payload);
+    try {
+      const params = new URLSearchParams({ access_key: accessKey, keywords: 'geopolitics OR diplomacy OR conflict OR sanctions OR energy security', languages: 'en', sort: 'published_desc', limit: '8' });
+      const response = await fetch(`https://api.mediastack.com/v1/news?${params}`, { signal: AbortSignal.timeout(12_000) });
+      const data = await response.json().catch(() => ({}));
+      if (data.error) return reply(res, 502, { error: `Mediastack: ${data.error.message || data.error.code || 'request failed'}` });
+      if (!response.ok) return reply(res, 502, { error: `Mediastack returned HTTP ${response.status}.` });
+      const retrieved_at = new Date().toISOString();
+      const signals = (data.data || []).map(article => {
+        let safeUrl; try { const parsed = new URL(article.url); if (parsed.protocol !== 'https:') return null; safeUrl = parsed.href; } catch { return null; }
+        return { title: article.title || article.source || 'News article', url: safeUrl, snippet: article.description || '', source: article.source || '', published_at: article.published_at || null, retrieved_at };
+      }).filter(Boolean);
+      const payload = { retrieved_at, provider: 'Mediastack', signals };
+      mediaStackCache = { expiresAt: Date.now() + 10 * 60 * 1000, payload };
+      return reply(res, 200, payload);
+    } catch (error) {
+      return reply(res, 502, { error: error.name === 'TimeoutError' ? 'Mediastack request timed out. Try again.' : 'Could not reach Mediastack. Check the server network connection.' });
+    }
   }
   if (req.method === 'GET' && url.pathname === '/api/models') {
     const status = await ollamaStatus(); return reply(res, 200, status);
@@ -374,6 +424,10 @@ async function route(req, res) {
   }
   if (req.method === 'GET' && url.pathname === '/api/history') {
     const rows = database.prepare('SELECT id,role,content,mode,created FROM messages ORDER BY id DESC LIMIT 100').all().reverse(); return reply(res, 200, { messages: rows });
+  }
+  if (req.method === 'DELETE' && url.pathname === '/api/history') {
+    database.prepare('DELETE FROM messages').run();
+    return reply(res, 200, { ok: true });
   }
   if (req.method === 'GET' && url.pathname === '/api/library') {
     const documents = database.prepare('SELECT id,title,filename,created FROM documents ORDER BY id DESC').all(); return reply(res, 200, { curated: { title: 'MERIDIAN strategic reading notes', filename: 'library.md' }, documents });

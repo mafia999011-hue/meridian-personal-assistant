@@ -1,6 +1,6 @@
 # MERIDIAN — Personal AI Assistant
 
-The existing Node MERIDIAN app now includes local Ollama support, public web research with source links, local TXT retrieval, saved conversations/reports, and specialist analysis modes while retaining its Codex CLI chat, debate, interruption, browser speech input, and Fish Audio voice output.
+The existing Node MERIDIAN app now includes local Ollama support, public web research with source links, local TXT retrieval, saved conversations/reports, Mediastack geopolitical headlines, Aviationstack flight tracking, and specialist analysis modes while retaining its Codex CLI chat, debate, interruption, browser speech input, and Fish Audio voice output.
 
 ## Start
 
@@ -11,6 +11,8 @@ PORT=4173
 AI_PROVIDER=codex
 OLLAMA_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=
+AVIATIONSTACK_ACCESS_KEY=
+MEDIASTACK_ACCESS_KEY=
 ```
 
 `codex` keeps the existing signed-in Codex CLI provider. Set `AI_PROVIDER=ollama` to use Ollama only. Ollama must already be running and have a model installed; MERIDIAN does not start it or download models. `OLLAMA_MODEL` can select a model by its installed name. With the default Codex provider, Ollama status remains visible in the dashboard.
@@ -26,6 +28,14 @@ npm start
 Open `http://127.0.0.1:4173`. The server binds to `127.0.0.1` only. Press Ctrl+C to stop it.
 
 Node 24 is available in the inspected Termux environment and includes `node:sqlite`; there are no new npm dependencies. The app stores messages, library metadata, chunks, and reports in `data/meridian.sqlite3`; imported authorized TXT files are stored in `data/library/`. These local files are excluded from Git.
+
+## News and aviation tracking
+
+Set `MEDIASTACK_ACCESS_KEY` in `.env` to load sourced geopolitical headlines on demand. Results are cached locally for 10 minutes; the dashboard does not poll automatically. Mediastack plan limits affect request volume and freshness.
+
+## Aviation tracking
+
+Set `AVIATIONSTACK_ACCESS_KEY` in `.env` to enable the Live Aviation Tracker. It can query active flights, a flight number, departures from an airport, or arrivals to an airport. Flight data is requested on demand to avoid unnecessary API usage; provider timestamps, positions, and filtering depend on your Aviationstack plan. The key remains server-side.
 
 ## Research and library
 

@@ -11,19 +11,22 @@ function updateInterrupt() { interrupt.hidden = !(activeChat || activeSpeech || 
 function appendBubbleMetadata(el, sources = [], truncated = false, cached = false) {
   if (sources.length) {
     const list = document.createElement('div'); list.className = 'source-list';
-    const heading = document.createElement('b'); heading.textContent = 'Sources and retrieved library passages'; list.append(heading);
-    for (const source of sources) {
+    const heading = document.createElement('b'); heading.textContent = 'Evidence and source access'; list.append(heading);
+    let webSourceNumber = 0;
+    sources.forEach(source => {
       if (source.url) {
-        const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = source.title || source.url; list.append(link);
+        webSourceNumber += 1;
+        const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = `[${webSourceNumber}] ${source.title || source.url}`; list.append(link);
         const detail = document.createElement('small');
-        const published = source.published_at ? `Published ${new Date(source.published_at).toLocaleDateString()}.` : 'Publication date not identified.';
+        const published = source.published_at ? `Published ${new Date(source.published_at).toLocaleString()}.` : 'Publication date not identified.';
         const retrieved = source.retrieved_at ? `Retrieved ${new Date(source.retrieved_at).toLocaleString()}.` : '';
-        detail.textContent = `${source.opened ? 'Page opened; retrieved text may be partial.' : `Page unavailable: ${source.open_error || 'snippet only'}.`} ${published} ${retrieved} ${source.snippet || ''}`;
+        const access = source.opened ? 'Page opened; extracted text may be partial.' : `Page not opened: ${source.open_error || 'search snippet only'}. Treat this as a lead, not checked article text.`;
+        detail.textContent = [access, published, retrieved, source.snippet].filter(Boolean).join(' ');
         list.append(detail);
       } else {
-        const detail = document.createElement('small'); detail.textContent = `${source.title}, chunk ${source.chunk_id}`; list.append(detail);
+        const detail = document.createElement('small'); detail.textContent = `Library passage: ${source.title}, chunk ${source.chunk_id}. Imported text is reference material, not independent verification.`; list.append(detail);
       }
-    }
+    });
     el.append(list);
   }
   if (cached) { const note = document.createElement('small'); note.textContent = 'Reused from MERIDIAN’s local answer cache.'; el.append(note); }
@@ -161,11 +164,67 @@ async function loadHistory() {
   try { const data = await api('/api/history'); history = data.messages.filter(x => x.role === 'user' || x.role === 'assistant').slice(-16).map(x => ({ role: x.role, content: x.content })); for (const item of history) bubble(item.role, item.content); }
   catch (error) { status.textContent = `Conversation history unavailable: ${error.message}`; }
 }
+async function loadFlights(event) {
+  event?.preventDefault();
+  const status = $('#flightStatus'), results = $('#flightResults'), type = $('#flightScope').value;
+  const query = $('#flightQuery').value.trim();
+  if (type !== 'active' && !query) { status.textContent = 'ENTER A FLIGHT OR AIRPORT CODE'; $('#flightQuery').focus(); return; }
+  status.textContent = 'FETCHING LIVE DATA…';
+  results.textContent = 'Contacting Aviationstack…';
+  try {
+    const params = new URLSearchParams({ type }); if (query) params.set('q', query);
+    const data = await api(`/api/flights?${params}`);
+    results.replaceChildren();
+    for (const flight of data.flights) {
+      const card = document.createElement('article'); card.className = 'flight-card';
+      const label = flight.flight?.iata || flight.flight?.icao || flight.flight?.number || 'Flight';
+      const title = document.createElement('h3'); title.textContent = `${label} · ${flight.airline?.name || 'Airline unavailable'}`;
+      const state = document.createElement('p'); state.className = 'flight-state'; state.textContent = flight.flight_status || 'Status unavailable';
+      const route = document.createElement('p'); route.textContent = `${flight.departure?.airport || flight.departure?.iata || 'Unknown'} (${flight.departure?.iata || '—'}) → ${flight.arrival?.airport || flight.arrival?.iata || 'Unknown'} (${flight.arrival?.iata || '—'})`;
+      const times = document.createElement('p'); times.textContent = `Departure ${flight.departure?.actual || flight.departure?.estimated || flight.departure?.scheduled || '—'} · Arrival ${flight.arrival?.actual || flight.arrival?.estimated || flight.arrival?.scheduled || '—'}`;
+      card.append(title, state, route, times);
+      if (flight.live && Number.isFinite(flight.live.latitude) && Number.isFinite(flight.live.longitude)) {
+        const position = document.createElement('p');
+        position.textContent = `Position ${flight.live.latitude.toFixed(3)}, ${flight.live.longitude.toFixed(3)} · ${flight.live.altitude ?? '—'} m · ${flight.live.speed_horizontal ?? '—'} km/h`;
+        card.append(position);
+      }
+      results.append(card);
+    }
+    if (!data.flights.length) results.textContent = 'No matching flights returned. Try a different flight or airport code.';
+    status.textContent = `${data.flights.length} SHOWN · ${data.total} MATCHING · RETRIEVED ${new Date(data.retrieved_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+  } catch (error) { results.textContent = error.message; status.textContent = 'FLIGHT DATA UNAVAILABLE'; }
+}
+async function loadSignals() {
+  const status = $('#signalsStatus'), list = $('#signals');
+  status.textContent = 'UPDATING';
+  try {
+    const data = await api('/api/signals');
+    list.replaceChildren();
+    for (const signal of data.signals) {
+      const row = document.createElement('article'); row.className = 'signal';
+      const body = document.createElement('div');
+      const title = document.createElement('h3');
+      const link = document.createElement('a'); link.href = signal.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = signal.title || signal.url;
+      title.append(link);
+      const summary = document.createElement('p'); summary.textContent = signal.snippet || 'Search result has no summary.';
+      const meta = document.createElement('p'); meta.className = 'signal-meta'; meta.textContent = `${signal.source ? `${signal.source} · ` : ''}${signal.published_at ? `Published ${new Date(signal.published_at).toLocaleString()}` : 'Publication time unavailable'} · Retrieved ${new Date(signal.retrieved_at).toLocaleString()}`;
+      body.append(title, summary, meta); row.append(body); list.append(row);
+    }
+    if (!data.signals.length) list.textContent = 'No current headlines returned.';
+    status.textContent = `UPDATED ${new Date(data.retrieved_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · ${data.provider}`;
+  } catch (error) {
+    list.replaceChildren(); const row = document.createElement('div'); row.className = 'signal';
+    const message = document.createElement('p'); message.textContent = `${error.message}. Use Refresh to try again.`; row.append(message); list.append(row);
+    status.textContent = 'UNAVAILABLE';
+  }
+}
 async function loadHealth() {
   try {
     const data = await api('/api/health'), ollama = data.ollama;
     $('#serviceBadge').textContent = `● LOCAL INTERFACE · ${String(data.provider).toUpperCase()}${ollama.available ? (ollama.models.length ? ` · OLLAMA ${ollama.selected_model}` : ' · OLLAMA HAS NO MODEL') : ''}`;
     $('#ollamaStatus').textContent = ollama.available ? (ollama.models.length ? `Local Ollama ready: ${ollama.models.join(', ')}` : 'Ollama API responds, but no model is installed.') : ollama.message;
+    if (!data.mediastack) $('#signalsStatus').textContent = 'KEY NEEDED · MEDIASTACK_ACCESS_KEY';
+    if (!data.aviationstack) $('#flightStatus').textContent = 'KEY NEEDED · AVIATIONSTACK_ACCESS_KEY';
   } catch (error) { $('#serviceBadge').textContent = '● BACKEND STATUS UNAVAILABLE'; $('#ollamaStatus').textContent = error.message; }
 }
 async function loadLibrary() {
@@ -194,7 +253,37 @@ document.querySelectorAll('.chip').forEach(button => button.addEventListener('cl
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) { recognition = new SR(); recognition.lang = navigator.language || 'en-US'; recognition.interimResults = false; recognition.onstart = () => { mic.textContent = '⏹ Listening…'; status.textContent = 'Listening — speak your question.'; }; recognition.onresult = e => { box.value = `${box.value} ${e.results[0][0].transcript}`.trim(); box.focus(); status.textContent = ''; }; recognition.onerror = () => { status.textContent = 'Voice input unavailable. You can type your question.'; }; recognition.onend = () => { mic.textContent = '🎙 Speak'; if (status.textContent.startsWith('Listening')) status.textContent = ''; }; mic.onclick = () => { if (activeChat || activeSpeech || currentAudio || ('speechSynthesis' in window && speechSynthesis.speaking)) interruptAll(); try { recognition.start(); } catch { recognition.stop(); } }; }
 else { mic.disabled = true; mic.title = 'Speech recognition is not available in this browser'; }
-loadHealth(); loadHistory(); loadLibrary(); loadReports();
+function initDepthMotion() {
+  if (!matchMedia('(hover: hover) and (pointer: fine)').matches || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelectorAll('.map-panel, .command').forEach(panel => {
+    let frame = 0, point = null;
+    panel.addEventListener('pointermove', event => {
+      if (event.pointerType !== 'mouse') return;
+      const rect = panel.getBoundingClientRect();
+      point = { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height };
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0; if (!point) return;
+        const x = Math.max(0, Math.min(1, point.x)), y = Math.max(0, Math.min(1, point.y));
+        panel.style.setProperty('--depth-x', `${((.5 - y) * 3.2).toFixed(2)}deg`);
+        panel.style.setProperty('--depth-y', `${((x - .5) * 3.2).toFixed(2)}deg`);
+        panel.style.setProperty('--light-x', `${(x * 100).toFixed(1)}%`);
+        panel.style.setProperty('--light-y', `${(y * 100).toFixed(1)}%`);
+      });
+    }, { passive: true });
+    panel.addEventListener('pointerleave', () => {
+      point = null;
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
+      panel.style.setProperty('--depth-x', '0deg'); panel.style.setProperty('--depth-y', '0deg');
+      panel.style.setProperty('--light-x', '50%'); panel.style.setProperty('--light-y', '50%');
+    });
+  });
+}
+initDepthMotion();
+loadHealth(); loadHistory(); loadLibrary(); loadReports(); loadSignals();
+$('#flightForm')?.addEventListener('submit', loadFlights);
+$('#flightScope')?.addEventListener('change', () => { $('#flightQuery').placeholder = $('#flightScope').value === 'flight' ? 'Flight number, e.g. AI101' : $('#flightScope').value === 'active' ? 'Optional' : 'Airport IATA code, e.g. DEL'; });
+$('#refreshSignals')?.addEventListener('click', loadSignals);
 
 // Dashboard interactions: keep the command categories mapped to the existing backend modes.
 const category = $('#category');
@@ -250,11 +339,16 @@ function updateClock() {
   $('#date').textContent = now.toLocaleDateString([], { weekday: 'short', year: 'numeric', month: 'short', day: '2-digit' }).toUpperCase();
 }
 updateClock(); window.setInterval(updateClock, 1000);
-$('#clearChat')?.addEventListener('click', () => {
+$('#clearChat')?.addEventListener('click', async () => {
   if (activeChat || activeSpeech || currentAudio) interruptAll();
-  convo.replaceChildren();
-  const empty = document.createElement('div'); empty.className = 'empty'; empty.id = 'empty';
-  const title = document.createElement('strong'); title.textContent = 'Your analysis will appear here.';
-  empty.append(title, document.createTextNode('Responses use the configured local model. Web sources are shown when research is requested or current information is needed.'));
-  convo.append(empty); history = [];
+  const button = $('#clearChat'); button.disabled = true;
+  try {
+    await api('/api/history', { method: 'DELETE' });
+    convo.replaceChildren();
+    const empty = document.createElement('div'); empty.className = 'empty'; empty.id = 'empty';
+    const title = document.createElement('strong'); title.textContent = 'Your analysis will appear here.';
+    empty.append(title, document.createTextNode('Responses use the configured local model. Web sources are shown when research is requested or current information is needed.'));
+    convo.append(empty); history = []; status.textContent = 'Conversation cleared.';
+  } catch (error) { status.textContent = `Could not clear saved conversation: ${error.message}`; }
+  finally { button.disabled = false; }
 });
