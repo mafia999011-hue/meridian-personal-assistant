@@ -4,6 +4,7 @@ const query = document.querySelector('#flightQuery');
 const status = document.querySelector('#flightStatus');
 const results = document.querySelector('#flightResults');
 const submit = document.querySelector('#fetchFlights');
+const queryLabel = document.querySelector('label[for="flightQuery"]');
 
 function emptyResult(message) {
   const box = document.createElement('div');
@@ -61,10 +62,19 @@ function flightCard(flight) {
   return card;
 }
 
-scope.addEventListener('change', () => {
-  query.placeholder = scope.value === 'flight' ? 'Flight number, e.g. AI101' : scope.value === 'active' ? 'Optional for active flights' : 'Airport IATA code, e.g. DEL';
-  query.setAttribute('aria-label', scope.value === 'flight' ? 'Flight number' : 'Airport IATA code');
-});
+function updateQueryControl() {
+  const active = scope.value === 'active';
+  query.disabled = active;
+  query.required = false;
+  query.setAttribute('aria-required', String(!active));
+  if (active) query.value = '';
+  query.placeholder = scope.value === 'flight' ? 'Flight number, e.g. AI101' : 'Airport IATA code, e.g. DEL';
+  queryLabel.textContent = scope.value === 'flight' ? 'Flight number' : active ? 'Code filter (not used for active flights)' : 'Airport IATA code';
+  query.setAttribute('aria-label', scope.value === 'flight' ? 'Flight number' : active ? 'Code filter, disabled for active flights' : 'Airport IATA code');
+}
+
+scope.addEventListener('change', updateQueryControl);
+updateQueryControl();
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
@@ -85,11 +95,11 @@ form.addEventListener('submit', async event => {
     const response = await fetch(`/api/flights?${params}`, { headers: { Accept: 'application/json' } });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
-    const flights = Array.isArray(data.flights) ? data.flights : [];
+    const flights = Array.isArray(data.flights) ? data.flights.filter(flight => flight && typeof flight === 'object') : [];
     if (!flights.length) emptyResult('No matching flights returned. Try another flight number or airport code.');
     else results.replaceChildren(...flights.map(flightCard));
     const retrieved = data.retrieved_at ? new Date(data.retrieved_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'time unavailable';
-    status.textContent = `${flights.length} SHOWN · ${data.total} MATCHING · RETRIEVED ${retrieved}`;
+    status.textContent = `${flights.length} SHOWN · ${Number.isFinite(data.total) ? data.total : flights.length} MATCHING · RETRIEVED ${retrieved}`;
   } catch (error) {
     emptyResult(error.message || 'Flight data is unavailable. Try again.');
     status.textContent = /AVIATIONSTACK_KEY_REJECTED|Aviationstack rejected its configured key/i.test(error.message) ? 'AVIATIONSTACK KEY REJECTED · CHECK SERVER CONFIGURATION' : 'FLIGHT DATA UNAVAILABLE';
