@@ -685,14 +685,17 @@ async function route(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/login') {
     try {
       const body = await readBody(req, 4096);
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
       const username = typeof body.username === 'string' ? body.username : '';
       const password = typeof body.password === 'string' ? body.password : '';
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return reply(res, 400, { error: 'Enter a valid email address.' });
       if (username.length > 128 || password.length > 1024 || !credentialsMatch(username, authUsername) || !credentialsMatch(password, authPassword)) return reply(res, 401, { error: 'Invalid username or password.' });
       const now = Date.now();
       for (const [key, value] of sessions) if (value.expiresAt <= now) sessions.delete(key);
       while (sessions.size >= 10) sessions.delete(sessions.keys().next().value);
       const token = randomBytes(32).toString('base64url');
       sessions.set(token, { expiresAt: now + sessionTtlMs });
+      console.log(`[auth] successful sign-in email=${JSON.stringify(email)}`);
       return reply(res, 200, { authenticated: true }, 'application/json; charset=utf-8', { 'Set-Cookie': authCookie(token) });
     } catch (error) { return reply(res, error.status || 400, { error: 'Could not sign in. Check your credentials and try again.' }); }
   }

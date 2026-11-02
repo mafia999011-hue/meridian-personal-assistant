@@ -12,6 +12,7 @@ form.addEventListener('submit', async event => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        email: form.elements.email.value,
         username: form.elements.username.value,
         password: form.elements.password.value,
       }),
