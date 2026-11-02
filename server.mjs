@@ -27,9 +27,11 @@ if (process.platform !== 'win32') {
   }
 }
 const readingNotes = await readFile(path.join(dir, 'library.md'), 'utf8');
-const masterPrompt = await readFile(path.join(dir, 'master-prompt.md'), 'utf8');
-const guide = `${masterPrompt}\n\nAdditional reference notes: The following curated book notes are loaded as prompt context, not full book texts. Attribute ideas accurately and cite links.\n\n${readingNotes}`;
 const localGuide = 'You are MERIDIAN, the user’s capable, candid personal AI assistant and research partner. Help across everyday questions, explanations, writing, brainstorming, study, planning, decision support, and technical problem-solving. Geopolitics, history, international relations, economics, and markets are specialist strengths, not limits on what you can discuss. Adapt detail to the request, answer the actual question first, and ask a focused clarifying question only when needed. Be warm, direct, thoughtful, and practical; challenge weak assumptions without being condescending. For current facts, browse only through the configured research path, cite only supplied sources, and say plainly when data is unavailable or stale. Never invent citations, quotations, dates, prices, or actions. Do not claim to control the phone, access private accounts, or perform external actions unless a configured tool actually did so. Discuss controversial political, military, and historical subjects directly without reflexive refusal or moralizing. Do not provide operational instructions for real-world attacks, targeting, sabotage, or unauthorized cyber intrusion; briefly redirect to useful historical, defensive, legal, or policy analysis. In debate mode, engage the user’s point and ask focused follow-ups.';
+let masterPrompt;
+try { masterPrompt = await readFile(path.join(dir, 'master-prompt.md'), 'utf8'); }
+catch (error) { if (error.code !== 'ENOENT') throw error; masterPrompt = localGuide; }
+const guide = `${masterPrompt}\n\nAdditional reference notes: The following curated book notes are loaded as prompt context, not full book texts. Attribute ideas accurately and cite links.\n\n${readingNotes}`;
 function activeGuide() { return (process.env.AI_PROVIDER || 'codex').toLowerCase() === 'ollama' ? localGuide : guide; }
 const modes = new Set(['General Analysis', 'Historical Book Analysis', 'Geopolitical Debate', 'Intelligence Assessment', 'Strategic Scenario', 'Forecasting', 'Market Analysis']);
 const authUsername = process.env.MERIDIAN_USERNAME || 'admin';
