@@ -2,32 +2,72 @@
 
 The existing Node MERIDIAN app now includes local Ollama support, public web research with source links, local TXT retrieval, saved conversations/reports, Mediastack geopolitical headlines, Aviationstack flight tracking, and specialist analysis modes while retaining its Codex CLI chat, debate, interruption, browser speech input, and Fish Audio voice output.
 
-## Start
+## Install on Linux, macOS, or Windows
 
-This project already has a `.env` containing private settings. Keep it; do not replace it with `.env.example`. Add or edit only the settings you need:
+MERIDIAN requires Git and Node.js 24 or newer. Node 24 is the minimum supported runtime because the app uses Node's built-in SQLite module. The project has no npm dependencies to install.
 
-```env
-PORT=4173
-AI_PROVIDER=codex
-OLLAMA_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=
-AVIATIONSTACK_ACCESS_KEY=
-MEDIASTACK_ACCESS_KEY=
-```
+### 1. Install Node.js and Git
 
-`codex` keeps the existing signed-in Codex CLI provider. Set `AI_PROVIDER=ollama` to use Ollama only. Ollama must already be running and have a model installed; MERIDIAN does not start it or download models. `OLLAMA_MODEL` can select a model by its installed name. With the default Codex provider, Ollama status remains visible in the dashboard.
-This phone is currently configured for `qwen3:1.7b` as a balance of response quality and speed. Ollama generation has no fixed answer-token cap and uses an 8,192-token context window. Longer responses can take substantially longer and use more memory; press Stop or Esc to interrupt. `qwen3:0.6b` is installed for faster, lighter replies; `qwen3:4b` is available for stronger analysis at slower speeds.
+- **Windows:** Install the current LTS release from the [official Node.js downloads page](https://nodejs.org/en/download). Install [Git for Windows](https://git-scm.com/download/win) if Git is not already available.
+- **macOS:** Install Git with Xcode Command Line Tools (`xcode-select --install`) or Homebrew, then install Node 24 or newer. With [nvm](https://github.com/nvm-sh/nvm), run `nvm install 24`.
+- **Linux:** Install Git with your distribution's package manager. Install Node 24 or newer from the [official Node.js downloads page](https://nodejs.org/en/download), or use [nvm](https://github.com/nvm-sh/nvm) and run `nvm install 24`.
 
-Start with:
+Check the installed runtime:
 
 ```sh
-cd "$HOME/geopolitics-agent"
+node --version
+```
+
+The version must be `v24` or newer.
+
+### 2. Clone the repository
+
+Run these commands in PowerShell, Terminal, or your Linux shell:
+
+```sh
+git clone https://github.com/mafia999011-hue/meridian-personal-assistant.git
+cd meridian-personal-assistant
+```
+
+### 3. Configure an AI provider
+
+For local AI, install [Ollama](https://ollama.com/download) for your operating system, then download the model:
+
+```sh
+ollama pull qwen3:1.7b
+```
+
+On Windows, Ollama runs in the background after installation. On macOS, open the Ollama app. On Linux, start the Ollama service if your installer did not start it.
+
+Create your local settings file. **PowerShell:**
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+**Linux or macOS:**
+
+```sh
+cp .env.example .env
+${EDITOR:-nano} .env
+```
+
+Set `AI_PROVIDER=ollama` in `.env`. Keep API keys private in this file; do not commit `.env`. Add optional Mediastack, Aviationstack, or Fish Audio credentials only if you use those features. Aviationstack and Mediastack require separate provider keys.
+
+You can use `AI_PROVIDER=codex` instead if the Codex CLI is installed and signed in on your machine.
+
+### 4. Start MERIDIAN
+
+From the project directory, run:
+
+```sh
 npm start
 ```
 
-Open `http://127.0.0.1:4173`. The server binds to `127.0.0.1` only. Press Ctrl+C to stop it.
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). The server listens on this computer only. Press Ctrl+C in the terminal to stop it. If port 4173 is occupied, set a different `PORT` in `.env` and restart.
 
-Node 24 is available in the inspected Termux environment and includes `node:sqlite`; there are no new npm dependencies. The app stores messages, library metadata, chunks, and reports in `data/meridian.sqlite3`; imported authorized TXT files are stored in `data/library/`. These local files are excluded from Git.
+The app stores conversations, reports, and library metadata in `data/meridian.sqlite3`; imported TXT files are stored in `data/library/`. Those local files are excluded from Git.
 
 ## News and aviation tracking
 
